@@ -92,6 +92,12 @@ struct js_env_s {
   // caught it. Maps to Bare's "uncaughtException" event flow.
   js_uncaught_exception_cb on_uncaught = nullptr;
   void *on_uncaught_data = nullptr;
+
+  // Re-entry guard for on_uncaught dispatch. Bare's uncaught
+  // handler itself calls js_call_function, which may throw, which
+  // would call on_uncaught again — infinite recursion. When this
+  // is true we skip the callback and just print the error.
+  bool in_uncaught = false;
 };
 
 // A scope owns a vector of values; closing the scope drops them all.
@@ -431,54 +437,61 @@ js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size
     return -1;
   }
 
-  // Resolve the callee — must be a jsi::Function (an Object that
-  // passes Function::isFunction). asObject() throws JSError
-  // otherwise; we let that propagate for now and capture it via
-  // the uncaught-exception path once that's wired.
-  auto fn = function->value.asObject(rt).asFunction(rt);
-
-  // Marshal C-side argv into a JSI-side Value[]. jsi::Function::call*
-  // wants a `const Value*` plus count; allocate on the stack for
-  // small calls, heap otherwise. Bare's host functions in practice
-  // never exceed a handful of args.
-  constexpr size_t INLINE_ARGS = 8;
-  jsi::Value inline_args[INLINE_ARGS];
-  std::vector<jsi::Value> heap_args;
-  jsi::Value *jargs = inline_args;
-  if (argc > INLINE_ARGS) {
-    heap_args.reserve(argc);
-    for (size_t i = 0; i < argc; i++) {
-      heap_args.emplace_back(rt, argv[i]->value);
-    }
-    jargs = heap_args.data();
-  } else {
-    for (size_t i = 0; i < argc; i++) {
-      jargs[i] = jsi::Value(rt, argv[i]->value);
-    }
-  }
-
-  // Cast to `const jsi::Value*` to bind the non-template
-  // `call(rt, const Value*, size_t)` / `callWithThis(rt, Object, const Value*, size_t)`
-  // overloads. Without the const, Hermes' variadic template
-  // overload wins resolution and tries to convert (Value*, size_t)
-  // into JS args directly.
-  const jsi::Value *cjargs = jargs;
-  jsi::Value out;
-  // jsi::Function::call propagates JS errors as C++ exceptions
-  // (jsi::JSError). Bare's callers don't catch C++ exceptions, so
-  // an uncaught JS error inside the called function would walk up
-  // the stack until libc++abi terminates the whole process. Catch
-  // here and surface as a normal -1 return + pending exception.
+  // Wrap the ENTIRE body — including the asObject() coercion and
+  // the argv marshalling — in try/catch. Bare's callers (especially
+  // the on_uncaught handler which itself calls js_call_function
+  // again after a worker threw) hand us values that may not be
+  // objects/functions, and jsi::Value::asObject throws C++
+  // exceptions on type mismatch. With the catch only around fn.call
+  // those preamble throws still escaped to libc++abi and
+  // std::terminate()'d the whole process.
   try {
+    auto fn = function->value.asObject(rt).asFunction(rt);
+
+    // Marshal C-side argv into a JSI-side Value[]. jsi::Function::call*
+    // wants a `const Value*` plus count; allocate on the stack for
+    // small calls, heap otherwise. Bare's host functions in practice
+    // never exceed a handful of args.
+    constexpr size_t INLINE_ARGS = 8;
+    jsi::Value inline_args[INLINE_ARGS];
+    std::vector<jsi::Value> heap_args;
+    jsi::Value *jargs = inline_args;
+    if (argc > INLINE_ARGS) {
+      heap_args.reserve(argc);
+      for (size_t i = 0; i < argc; i++) {
+        heap_args.emplace_back(rt, argv[i]->value);
+      }
+      jargs = heap_args.data();
+    } else {
+      for (size_t i = 0; i < argc; i++) {
+        jargs[i] = jsi::Value(rt, argv[i]->value);
+      }
+    }
+
+    // Cast to `const jsi::Value*` to bind the non-template
+    // `call(rt, const Value*, size_t)` /
+    // `callWithThis(rt, Object, const Value*, size_t)` overloads.
+    // Without the const, Hermes' variadic template overload wins
+    // resolution and tries to convert (Value*, size_t) into JS args
+    // directly.
+    const jsi::Value *cjargs = jargs;
+    jsi::Value out;
     if (receiver != nullptr) {
       out = fn.callWithThis(rt, receiver->value.asObject(rt), cjargs, argc);
     } else {
       out = fn.call(rt, cjargs, argc);
     }
+
+    if (result != nullptr) {
+      *result = adopt_value(env, std::move(out));
+    }
+    return 0;
   } catch (jsi::JSError &err) {
     js_value_t *errv = adopt_value(env, jsi::Value(rt, err.value()));
-    if (env->on_uncaught) {
+    if (env->on_uncaught && !env->in_uncaught) {
+      env->in_uncaught = true;
       env->on_uncaught(env, errv, env->on_uncaught_data);
+      env->in_uncaught = false;
     } else {
       fprintf(stderr, "[libhermes] uncaught JSError in js_call_function: %s\n",
         err.what());
@@ -491,11 +504,6 @@ js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size
     if (result) *result = nullptr;
     return -1;
   }
-
-  if (result != nullptr) {
-    *result = adopt_value(env, std::move(out));
-  }
-  return 0;
 }
 
 extern "C" int
@@ -517,8 +525,10 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
     // own message — the value() it carries is the JS-side Error
     // object Bare wants to surface.
     js_value_t *errv = adopt_value(env, jsi::Value(rt, err.value()));
-    if (env->on_uncaught) {
+    if (env->on_uncaught && !env->in_uncaught) {
+      env->in_uncaught = true;
       env->on_uncaught(env, errv, env->on_uncaught_data);
+      env->in_uncaught = false;
     } else {
       fprintf(stderr, "[libhermes] uncaught JS error in run_script: %s\n",
         err.what());
@@ -533,8 +543,10 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
     auto errObj = rt.global().getPropertyAsFunction(rt, "Error")
       .callAsConstructor(rt, msg);
     js_value_t *errv = adopt_value(env, std::move(errObj));
-    if (env->on_uncaught) {
+    if (env->on_uncaught && !env->in_uncaught) {
+      env->in_uncaught = true;
       env->on_uncaught(env, errv, env->on_uncaught_data);
+      env->in_uncaught = false;
     } else {
       fprintf(stderr, "[libhermes] JSI exception in run_script: %s\n",
         err.what());
