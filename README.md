@@ -28,21 +28,49 @@ Concrete wins:
 
 ## Status
 
-Scaffold. The repo lays out the cmake-fetch + js.h shape; the
-binding implementation in `src/js.cc` is a stub that compiles
-but reports "not implemented" for js.h calls. See the file header
-for the Phase 1 milestone (`bare --eval 'console.log(1+1)'`).
+**Phase 1: in progress.** Build pipeline works end-to-end and the
+first smoke test passes:
+
+```
+$ bun install
+$ cmake -B build
+$ cmake --build build --target eval-script
+$ ./build/test/eval-script
+[eval-script] result: 'hello, hermes' (len=13)
+[eval-script] OK
+```
+
+That exercises platform / env creation, handle scopes, string
+creation + UTF-8 readback, and `js_run_script` through Hermes'
+JSI. Roughly 13 of 19 Phase 1 js_* functions are implemented; the
+remaining gap is `js_create_function` / `js_call_function` (the
+JSI HostFunction binding), which is the next thing to land before
+hooking into Bare proper.
 
 Planned phases:
 
 1. **Binding** — implement the js.h surface against Hermes' JSI /
    `hermes::vm::Runtime`. Target ~2-3K LOC by analogy with libqjs.
+   Foundation in place; remaining work is the HostFunction wrapper
+   and the rest of the object/array surface.
 2. **AOT bytecode** — Vite/CLI step that runs `hermesc` over
    bundled worker .mjs to emit `.hbc`. Worker spawn parse cost
    drops to near zero.
 3. **iOS default** — once stable, swap the default Bare engine on
    iOS from bare-jsc to bare-hermes in
    [@zappdev/cli](https://github.com/popaprozac/zapp).
+
+## Local dev
+
+```
+bun install
+cmake -B build && cmake --build build --target js_static
+cmake --build build --target eval-script
+./build/test/eval-script
+```
+
+First cmake configure pulls Hermes (~6 MB src) via cmake-fetch +
+takes ~45s. Subsequent configures are cached.
 
 ## License
 
