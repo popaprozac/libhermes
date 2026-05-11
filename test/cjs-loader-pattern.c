@@ -159,6 +159,49 @@ main(void) {
     "  return factory(module.exports, module);\n"
     "})()");
 
+  // Test 5: class extends Error with a default-parameter referencing
+  // the class name. This is the suspect pattern from Zapp's worker.mjs
+  // (offset 559):
+  //   class e extends Error { constructor(t,n,r=e,i){ super(...) } }
+  // Hermes' ES6Class lowering pass crashes on this exact shape — an
+  // EXC_BAD_ACCESS in ES6ClassesTransformations::makeHermesES6InternalCall.
+  // Likely the self-referencing default value in the constructor
+  // params interacts badly with how Hermes hoists the class binding
+  // for the transformation.
+  try_script(env, "class-extends-default-self-ref",
+    "(function () {\n"
+    "  class E extends Error {\n"
+    "    constructor(t, n, r = E, i) { super(t); this.code = n; this.cls = r; }\n"
+    "  }\n"
+    "  const e = new E('msg', 'CODE');\n"
+    "  return e.code + ',' + (e.cls === E);\n"
+    "})()");
+
+  // Test 6: Same as 5 but as a class EXPRESSION assigned to a variable.
+  try_script(env, "class-expr-extends-default-self-ref",
+    "(function () {\n"
+    "  const C = class E extends Error {\n"
+    "    constructor(t, n, r = E, i) { super(t); this.code = n; this.cls = r; }\n"
+    "  };\n"
+    "  const e = new C('msg', 'CODE');\n"
+    "  return e.code + ',' + (e.cls === C);\n"
+    "})()");
+
+  // Test 7: Same shape but the class is the value of an arrow factory
+  // call — the EXACT shape in worker.mjs's minified output.
+  try_script(env, "class-expr-in-cjs-factory",
+    "(function () {\n"
+    "  const o = (e, t) => () => (t || e((t = {exports: {}}).exports, t), t.exports);\n"
+    "  const factory = (e, t) => {\n"
+    "    t.exports = class e extends Error {\n"
+    "      constructor(n, r, i = e) { super(n); this.code = r; }\n"
+    "    };\n"
+    "  };\n"
+    "  const wrapped = o(factory);\n"
+    "  const C = wrapped();\n"
+    "  return typeof C;\n"
+    "})()");
+
   CHECK(js_destroy_env(env));
   CHECK(js_destroy_platform(platform));
   return 0;
