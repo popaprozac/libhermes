@@ -841,6 +841,15 @@ extern "C" int
 js_set_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t *value) {
   auto &rt = *env->runtime;
   auto arr = object->value.asObject(rt).asArray(rt);
+  // jsi::Array::setValueAtIndex is bounds-checked — passing an
+  // index >= length throws "out of bounds" in Hermes. Bare's
+  // bootstrap relies on grow-on-write semantics (e.g.
+  // bare_addon_get_static loops `js_set_element(arr, i++, ...)`
+  // starting from index 0 on a zero-length array). Grow the
+  // array first so the write lands.
+  if (index >= arr.length(rt)) {
+    arr.setProperty(rt, "length", static_cast<double>(index + 1));
+  }
   arr.setValueAtIndex(rt, index, jsi::Value(rt, value->value));
   return 0;
 }
