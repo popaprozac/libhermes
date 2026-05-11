@@ -209,8 +209,16 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   // setImmediate; with the C++ microtask queue ON, promise
   // continuations queue through HermesRuntime::queueMicrotask
   // instead and we drain them via drainMicrotasks().
+  //
+  // ES6Class defaults to FALSE in Hermes' RuntimeConfig. With it
+  // off, the parser rejects `class X {}` (both declarations and
+  // expressions) with "Invalid expression encountered". Modern JS
+  // bundles use classes everywhere — bare-events does
+  // `module.exports = exports = class EventEmitter {...}` which is
+  // a hard requirement for the bare bootstrap. Turn it on.
   auto config = ::hermes::vm::RuntimeConfig::Builder()
     .withMicrotaskQueue(true)
+    .withES6Class(true)
     .build();
   env->runtime = ::facebook::hermes::makeHermesRuntime(config);
   *result = env;

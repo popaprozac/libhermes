@@ -21,6 +21,7 @@ list(APPEND tests
   promise-flow
   define-properties
   wrap-unwrap
+  chained-class-assign
 )
 
 foreach(test IN LISTS tests)
