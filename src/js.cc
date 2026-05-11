@@ -411,6 +411,18 @@ extern "C" int
 js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size_t argc, js_value_t *const argv[], js_value_t **result) {
   auto &rt = *env->runtime;
 
+  // Defensive: bare's bootstrap will happily call `js_call_function`
+  // with a NULL callee if an earlier stub returned -1 without bare
+  // checking the error code. Crashing here makes the bug invisible
+  // ("SIGSEGV in a function nobody can read"); returning -1 makes
+  // it surface as a normal error path and is much easier to chase.
+  if (function == nullptr) {
+    fprintf(stderr, "[libhermes] js_call_function called with NULL function "
+                    "(likely an earlier stub returned -1 silently)\n");
+    if (result) *result = nullptr;
+    return -1;
+  }
+
   // Resolve the callee — must be a jsi::Function (an Object that
   // passes Function::isFunction). asObject() throws JSError
   // otherwise; we let that propagate for now and capture it via
@@ -1645,7 +1657,88 @@ STUB(js_get_promise_state,   js_env_t*, js_value_t*, js_promise_state_t*)
 STUB(js_get_promise_result,  js_env_t*, js_value_t*, js_value_t**)
 STUB(js_get_heap_statistics, js_env_t*, js_heap_statistics_t*)
 STUB(js_adjust_external_memory, js_env_t*, int64_t, int64_t*)
-STUB(js_create_function_with_source, js_env_t*, const char*, size_t, const char*, size_t, js_value_t *const[], size_t, int, js_value_t*, js_value_t**)
+// js_create_function_with_source — compile a JS source string into
+// a function and return it. Bare's runtime.c uses this around the
+// bootstrap step (see vendor/bare/src/runtime.c:1307) to wrap the
+// embedded `bare.js` text into a callable; without this the entry
+// point is NULL and the subsequent `js_call_function` crashes on a
+// null receiver.
+//
+// We synthesize: `(function(arg0, arg1, ...) { <source> })` and
+// evaluate it. The returned jsi::Value is a Function object that
+// the caller can invoke via js_call_function.
+//
+// `args` is an array of js_value_t* whose underlying jsi::Value is
+// expected to be a String holding the parameter name. Bare currently
+// passes at most a few names; correctness over speed here.
+extern "C" int
+js_create_function_with_source(
+  js_env_t *env,
+  const char *name, size_t name_len,
+  const char *file, size_t file_len,
+  js_value_t *const args[], size_t args_count,
+  int offset,
+  js_value_t *source,
+  js_value_t **result
+) {
+  (void) name; (void) name_len; (void) offset;
+  auto &rt = *env->runtime;
+
+  // Pull the source out of its js_value_t (it's a JS string).
+  std::string src;
+  try {
+    src = source->value.asString(rt).utf8(rt);
+  } catch (jsi::JSError &err) {
+    return -1;
+  }
+
+  // Param names: each args[i] is a JS String. Join with commas.
+  std::string param_list;
+  for (size_t i = 0; i < args_count; i++) {
+    if (i > 0) param_list += ",";
+    try {
+      param_list += args[i]->value.asString(rt).utf8(rt);
+    } catch (jsi::JSError &err) {
+      return -1;
+    }
+  }
+
+  // Build the wrapper. The trailing newline before `})` guards against
+  // the source ending with a `//` line comment that would otherwise
+  // swallow the closing brace.
+  std::string wrapped = "(function(" + param_list + "){" + src + "\n})";
+
+  // sourceURL — Hermes uses it for stack traces. Bare passes the
+  // canonical path (e.g. "bare:/bare.js"); honor name_len when given.
+  std::string source_url;
+  if (file) {
+    source_url = (file_len == (size_t) -1)
+      ? std::string(file)
+      : std::string(file, file_len);
+  } else {
+    source_url = "<anonymous>";
+  }
+
+  auto buffer = std::make_shared<jsi::StringBuffer>(wrapped);
+  try {
+    auto fn = rt.evaluateJavaScript(buffer, source_url);
+    if (result) *result = adopt_value(env, std::move(fn));
+    return 0;
+  } catch (jsi::JSError &err) {
+    js_value_t *errv = adopt_value(env, jsi::Value(rt, err.value()));
+    if (env->on_uncaught) {
+      env->on_uncaught(env, errv, env->on_uncaught_data);
+    } else {
+      fprintf(stderr, "[libhermes] uncaught JSError in create_function_with_source: %s\n", err.what());
+    }
+    if (result) *result = nullptr;
+    return -1;
+  } catch (jsi::JSIException &err) {
+    fprintf(stderr, "[libhermes] JSI exception in create_function_with_source: %s\n", err.what());
+    if (result) *result = nullptr;
+    return -1;
+  }
+}
 STUB(js_create_typed_function, js_env_t*, const char*, size_t, js_function_cb, const js_callback_signature_t*, const void*, void*, js_value_t**)
 STUB(js_get_typed_callback_info, const js_typed_callback_info_t*, js_env_t**, void**)
 STUB(js_terminate_execution, js_env_t*)
