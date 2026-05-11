@@ -40,6 +40,7 @@ extern "C" {
 }
 
 #include <hermes/hermes.h>
+#include <hermes/Public/RuntimeConfig.h>
 #include <jsi/jsi.h>
 
 #include <cstring>
@@ -202,7 +203,16 @@ js_create_env(uv_loop_t *loop, js_platform_t *platform, const js_env_options_t *
   auto *env = new js_env_s();
   env->loop = loop;
   env->platform = platform;
-  env->runtime = ::facebook::hermes::makeHermesRuntime();
+  // Enable Hermes' microtask queue. Without this, Promise.then
+  // callbacks throw "Property 'setImmediate' doesn't exist" because
+  // Hermes' JS-side Promise polyfill expects a host-provided
+  // setImmediate; with the C++ microtask queue ON, promise
+  // continuations queue through HermesRuntime::queueMicrotask
+  // instead and we drain them via drainMicrotasks().
+  auto config = ::hermes::vm::RuntimeConfig::Builder()
+    .withMicrotaskQueue(true)
+    .build();
+  env->runtime = ::facebook::hermes::makeHermesRuntime(config);
   *result = env;
   return 0;
 }
@@ -1013,5 +1023,119 @@ js_is_external(js_env_t *env, js_value_t *value, bool *result) {
   // distinguish "any NativeState" from "our ExternalState" — for
   // now any HostObject-via-NativeState reads as external.
   *result = obj.hasNativeState<ExternalState>(rt);
+  return 0;
+}
+
+// === Promises =======================================================
+//
+// JSI has no first-class promise factory — you build one through
+// the global `Promise` constructor by passing an executor function.
+// The executor is invoked synchronously during construction; we
+// capture its resolve/reject arguments and stash them on the
+// js_deferred_s. Later, js_resolve_deferred / js_reject_deferred
+// call the captured callbacks.
+//
+// Lifetimes:
+//   js_deferred_s owns shared_ptr<jsi::Value> for resolve+reject
+//   so the Promise's continuation chain stays alive even after the
+//   creating handle scope closes.
+
+struct js_deferred_s {
+  // Shared with the executor lambda's captures so both sides hold
+  // strong refs while the executor's args are still being copied.
+  std::shared_ptr<jsi::Value> resolve;
+  std::shared_ptr<jsi::Value> reject;
+  HermesRuntime *runtime;
+};
+
+extern "C" int
+js_create_promise(js_env_t *env, js_deferred_t **deferred, js_value_t **promise) {
+  auto &rt = *env->runtime;
+
+  auto *def = new js_deferred_s();
+  def->resolve = std::make_shared<jsi::Value>(jsi::Value::undefined());
+  def->reject  = std::make_shared<jsi::Value>(jsi::Value::undefined());
+  def->runtime = env->runtime.get();
+
+  // Capture resolve/reject by shared_ptr so the executor closure
+  // doesn't need to outlive `def` directly.
+  auto resolve_slot = def->resolve;
+  auto reject_slot  = def->reject;
+
+  auto executor = jsi::Function::createFromHostFunction(
+    rt, jsi::PropNameID::forUtf8(rt, "executor"), 2,
+    [resolve_slot, reject_slot](
+      jsi::Runtime &rt,
+      const jsi::Value & /* thisVal */,
+      const jsi::Value *args,
+      size_t count
+    ) -> jsi::Value {
+      // Standard new Promise(executor) signature: args = [resolve, reject].
+      if (count >= 1) *resolve_slot = jsi::Value(rt, args[0]);
+      if (count >= 2) *reject_slot  = jsi::Value(rt, args[1]);
+      return jsi::Value::undefined();
+    }
+  );
+
+  auto promise_ctor = rt.global().getPropertyAsFunction(rt, "Promise");
+  auto promise_obj = promise_ctor.callAsConstructor(rt, executor);
+
+  *deferred = def;
+  *promise = adopt_value(env, std::move(promise_obj));
+  return 0;
+}
+
+// Helper: resolve or reject the deferred. Single body keeps the
+// scope/value plumbing in one place.
+static int
+deferred_complete(js_env_t *env, js_deferred_t *def, js_value_t *value, bool resolve) {
+  auto &rt = *env->runtime;
+  auto &slot = resolve ? *def->resolve : *def->reject;
+  if (slot.isUndefined()) {
+    // create_promise must have run; this is a contract violation —
+    // the executor never fired. Return a clear error code.
+    return -1;
+  }
+  auto cb = slot.asObject(rt).asFunction(rt);
+  jsi::Value arg = jsi::Value(rt, value->value);
+  cb.call(rt, arg);
+  // After completion, drop the deferred so subsequent resolve/reject
+  // calls on the same handle become explicit programmer errors
+  // (caught by the isUndefined check above on next call).
+  delete def;
+  return 0;
+}
+
+extern "C" int
+js_resolve_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resolution) {
+  return deferred_complete(env, deferred, resolution, true);
+}
+
+extern "C" int
+js_reject_deferred(js_env_t *env, js_deferred_t *deferred, js_value_t *resolution) {
+  return deferred_complete(env, deferred, resolution, false);
+}
+
+// Non-standard helper — drain pending microtasks. In a real Bare
+// integration this gets called from the libuv tick loop after each
+// IO event. For now expose it so tests can flush promise
+// continuations synchronously. Returns 1 if any microtasks were
+// drained (matches drainMicrotasks's bool return), 0 otherwise.
+extern "C" int
+js_run_microtasks(js_env_t *env) {
+  return env->runtime->drainMicrotasks() ? 1 : 0;
+}
+
+extern "C" int
+js_is_promise(js_env_t *env, js_value_t *value, bool *result) {
+  auto &rt = *env->runtime;
+  if (!value->value.isObject()) { *result = false; return 0; }
+  // JSI doesn't have isPromise(). Standard idiom: check whether
+  // the object has a `then` function. Not perfect (any thenable
+  // would match), but matches what V8/JSC do under the hood.
+  auto obj = value->value.asObject(rt);
+  auto then_prop = obj.getProperty(rt, "then");
+  if (!then_prop.isObject()) { *result = false; return 0; }
+  *result = then_prop.asObject(rt).isFunction(rt);
   return 0;
 }

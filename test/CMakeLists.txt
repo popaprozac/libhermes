@@ -18,6 +18,7 @@ list(APPEND tests
   data-roundtrip
   exception-flow
   arraybuffer-roundtrip
+  promise-flow
 )
 
 foreach(test IN LISTS tests)
