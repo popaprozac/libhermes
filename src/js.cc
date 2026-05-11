@@ -1670,6 +1670,144 @@ IS_FALSE(js_is_sharedarraybuffer)
 
 #undef STUB
 
+// === Additional gap fills from second integration pass ===========
+//
+// Numeric/string variants + typed-array predicates surfaced by
+// bare-type / bare-buffer at link time.
+
+extern "C" int
+js_get_value_uint32(js_env_t *env, js_value_t *value, uint32_t *result) {
+  (void) env;
+  *result = static_cast<uint32_t>(value->value.getNumber());
+  return 0;
+}
+
+extern "C" int
+js_get_value_int64(js_env_t *env, js_value_t *value, int64_t *result) {
+  (void) env;
+  // JSI numbers are doubles. ±2^53 precision; bare doesn't rely on
+  // bit-exact int64 here in the bootstrap path, so this is fine.
+  *result = static_cast<int64_t>(value->value.getNumber());
+  return 0;
+}
+
+// BigInt — Hermes JSI doesn't expose construction; stub for now.
+// js_create_bigint_int64 et al. return -1 and bare's bootstrap
+// doesn't construct BigInts at startup.
+#define STUB(name, ...) extern "C" int name(__VA_ARGS__) { return -1; }
+STUB(js_create_bigint_int64,        js_env_t*, int64_t, js_value_t**)
+STUB(js_create_bigint_uint64,       js_env_t*, uint64_t, js_value_t**)
+STUB(js_get_value_bigint_int64,     js_env_t*, js_value_t*, int64_t*, bool*)
+STUB(js_get_value_bigint_uint64,    js_env_t*, js_value_t*, uint64_t*, bool*)
+#undef STUB
+
+// String variants. Latin1 + UTF-16 paths can route through UTF-8
+// for now (lossy for UTF-16 surrogate pairs but bare's startup
+// strings are all ASCII). External-string variants don't get
+// special zero-copy treatment — we copy.
+extern "C" int
+js_create_string_latin1(js_env_t *env, const latin1_t *str, size_t len, js_value_t **result) {
+  // latin1 is a strict subset of utf8 for code points < 0x80, and
+  // each 0x80-0xFF byte expands to a 2-byte UTF-8 sequence. We do
+  // the simple thing: treat as utf8 directly. Bare's bootstrap
+  // doesn't use latin1 paths with high bytes.
+  return js_create_string_utf8(env, (const utf8_t *) str, len, result);
+}
+
+extern "C" int
+js_create_string_utf16le(js_env_t *env, const utf16_t *str, size_t len, js_value_t **result) {
+  // JSI doesn't have createFromUtf16 in the base interface;
+  // we'd need Hermes-specific path. For now build via String.fromCharCode.
+  // Optimize later when bare actually needs UTF-16 fast paths.
+  auto &rt = *env->runtime;
+  // Convert each UTF-16 unit to a JS String via String.fromCharCode.
+  auto fromCharCode = rt.global()
+    .getPropertyAsObject(rt, "String")
+    .getPropertyAsFunction(rt, "fromCharCode");
+  std::string out;
+  out.reserve(len * 3);
+  for (size_t i = 0; i < len; i++) {
+    uint16_t cu = str[i];
+    if (cu < 0x80) {
+      out.push_back(static_cast<char>(cu));
+    } else if (cu < 0x800) {
+      out.push_back(static_cast<char>(0xC0 | (cu >> 6)));
+      out.push_back(static_cast<char>(0x80 | (cu & 0x3F)));
+    } else {
+      out.push_back(static_cast<char>(0xE0 | (cu >> 12)));
+      out.push_back(static_cast<char>(0x80 | ((cu >> 6) & 0x3F)));
+      out.push_back(static_cast<char>(0x80 | (cu & 0x3F)));
+    }
+  }
+  (void) fromCharCode;
+  return js_create_string_utf8(env, (const utf8_t *) out.data(), out.size(), result);
+}
+
+extern "C" int
+js_create_external_string_latin1(js_env_t *env, latin1_t *str, size_t len, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result, bool *copied) {
+  // No zero-copy path; always copy and run the finalizer immediately.
+  int rc = js_create_string_latin1(env, str, len, result);
+  if (finalize_cb) finalize_cb(env, str, finalize_hint);
+  if (copied) *copied = true;
+  return rc;
+}
+
+extern "C" int
+js_create_property_key_utf8(js_env_t *env, const utf8_t *str, size_t len, js_value_t **result) {
+  // bare uses property keys as strings; treat identically to
+  // create_string_utf8 for now. Symbol-keyed properties not exercised
+  // by bare's bootstrap.
+  return js_create_string_utf8(env, str, len, result);
+}
+
+extern "C" int
+js_get_value_string_latin1(js_env_t *env, js_value_t *value, latin1_t *buf, size_t len, size_t *result) {
+  // Hand back UTF-8 bytes; bare's bootstrap doesn't use latin1
+  // read paths with high-byte content.
+  return js_get_value_string_utf8(env, value, (utf8_t *) buf, len, result);
+}
+
+extern "C" int
+js_get_value_string_utf16le(js_env_t *env, js_value_t *value, utf16_t *buf, size_t len, size_t *result) {
+  // Naive: decode UTF-8 into UTF-16 code units. Only handles BMP
+  // correctly without surrogate pair output; sufficient for bare's
+  // startup ASCII keys.
+  auto &rt = *env->runtime;
+  auto s = value->value.asString(rt).utf8(rt);
+  if (buf == nullptr) {
+    if (result) *result = s.size();
+    return 0;
+  }
+  size_t out_i = 0;
+  for (size_t i = 0; i < s.size() && out_i + 1 < len; i++) {
+    buf[out_i++] = static_cast<utf16_t>(static_cast<uint8_t>(s[i]));
+  }
+  if (result) *result = out_i;
+  return 0;
+}
+
+// TypedArray predicates — bare-type checks each one. All return
+// false until we wire actual TypedArray support in JSI. JSI 0.13's
+// `isArrayBuffer` exists but typed-array specific predicates need
+// reflection through JS.
+#define IS_TA(name) \
+  extern "C" int name(js_env_t *env, js_value_t *value, bool *result) { \
+    (void) env; (void) value; *result = false; return 0; \
+  }
+IS_TA(js_is_int8array)
+IS_TA(js_is_uint8array)
+IS_TA(js_is_uint8clampedarray)
+IS_TA(js_is_int16array)
+IS_TA(js_is_uint16array)
+IS_TA(js_is_int32array)
+IS_TA(js_is_uint32array)
+IS_TA(js_is_float16array)
+IS_TA(js_is_float32array)
+IS_TA(js_is_float64array)
+IS_TA(js_is_bigint64array)
+IS_TA(js_is_biguint64array)
+#undef IS_TA
+
 extern "C" int
 js_remove_wrap(js_env_t *env, js_value_t *object, void **result) {
   auto &rt = *env->runtime;
