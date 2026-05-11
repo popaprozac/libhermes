@@ -810,3 +810,208 @@ js_get_and_clear_last_exception(js_env_t *env, js_value_t **result) {
   *result = adopt_value(env, std::move(err));
   return 0;
 }
+
+// === Persistent references =========================================
+//
+// js_ref_t persists across handle scopes. jsi::Value's payload
+// (PointerValue*) is GC-tracked via the Runtime's cloneX hooks, so
+// just holding a jsi::Value member is sufficient for strong-ref
+// semantics — no extra rooting needed beyond Hermes' built-in
+// ManagedValue machinery.
+//
+// NAPI's refcount semantics: count > 0 = strong, count = 0 = weak.
+// JSI's standard surface doesn't expose weak object references in
+// a universal way, so for now we hold strong always and just track
+// the count. Switch to a `jsi::WeakObject` when refcount reaches 0
+// is a future refinement.
+
+struct js_ref_s {
+  jsi::Value value;
+  HermesRuntime *runtime;
+  uint32_t refcount;
+};
+
+extern "C" int
+js_create_reference(js_env_t *env, js_value_t *value, uint32_t count, js_ref_t **result) {
+  auto *ref = new js_ref_s();
+  ref->value = jsi::Value(*env->runtime, value->value);
+  ref->runtime = env->runtime.get();
+  ref->refcount = count;
+  *result = ref;
+  return 0;
+}
+
+extern "C" int
+js_delete_reference(js_env_t *env, js_ref_t *reference) {
+  (void) env;
+  delete reference;
+  return 0;
+}
+
+extern "C" int
+js_reference_ref(js_env_t *env, js_ref_t *reference, uint32_t *result) {
+  (void) env;
+  reference->refcount++;
+  if (result) *result = reference->refcount;
+  return 0;
+}
+
+extern "C" int
+js_reference_unref(js_env_t *env, js_ref_t *reference, uint32_t *result) {
+  (void) env;
+  if (reference->refcount > 0) reference->refcount--;
+  if (result) *result = reference->refcount;
+  return 0;
+}
+
+extern "C" int
+js_get_reference_value(js_env_t *env, js_ref_t *reference, js_value_t **result) {
+  *result = adopt_value(env, jsi::Value(*env->runtime, reference->value));
+  return 0;
+}
+
+// === Externals (opaque void* in JS) =================================
+//
+// JSI's NativeState attaches GC-tracked C++ data to a JS Object.
+// We piggyback on it: js_create_external returns an Object whose
+// only purpose is to carry the pointer; js_get_value_external
+// pulls it back out.
+
+namespace {
+class ExternalState : public jsi::NativeState {
+public:
+  ExternalState(js_env_t *env, void *data, js_finalize_cb cb, void *hint)
+    : env_(env), data_(data), finalize_cb_(cb), finalize_hint_(hint) {}
+
+  ~ExternalState() override {
+    // Called by JSI when the wrapping Object is GC'd. Hands the C
+    // caller back its data so they can free it.
+    if (finalize_cb_) finalize_cb_(env_, data_, finalize_hint_);
+  }
+
+  void *data() const { return data_; }
+
+private:
+  js_env_t *env_;
+  void *data_;
+  js_finalize_cb finalize_cb_;
+  void *finalize_hint_;
+};
+}
+
+extern "C" int
+js_create_external(js_env_t *env, void *data, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto state = std::make_shared<ExternalState>(env, data, finalize_cb, finalize_hint);
+  auto obj = jsi::Object(rt);
+  obj.setNativeState(rt, state);
+  *result = adopt_value(env, jsi::Value(rt, obj));
+  return 0;
+}
+
+extern "C" int
+js_get_value_external(js_env_t *env, js_value_t *value, void **result) {
+  auto &rt = *env->runtime;
+  auto obj = value->value.asObject(rt);
+  if (!obj.hasNativeState(rt)) {
+    *result = nullptr;
+    return -1;
+  }
+  auto state = obj.getNativeState<ExternalState>(rt);
+  *result = state ? state->data() : nullptr;
+  return 0;
+}
+
+// === ArrayBuffer ====================================================
+//
+// JSI's ArrayBuffer wraps a MutableBuffer<uint8_t>. For
+// js_create_arraybuffer we own the bytes; for
+// js_create_external_arraybuffer the caller owns them and supplies
+// a finalize callback that fires when JSI's GC drops the wrapping
+// object.
+
+namespace {
+class OwnedBuffer : public jsi::MutableBuffer {
+public:
+  explicit OwnedBuffer(size_t len) : bytes_(len, 0) {}
+  size_t size() const override { return bytes_.size(); }
+  uint8_t *data() override { return bytes_.data(); }
+
+private:
+  std::vector<uint8_t> bytes_;
+};
+
+class ExternalBufferAdapter : public jsi::MutableBuffer {
+public:
+  ExternalBufferAdapter(js_env_t *env, void *data, size_t len,
+                        js_finalize_cb cb, void *hint)
+    : env_(env), data_(static_cast<uint8_t *>(data)), len_(len),
+      finalize_cb_(cb), finalize_hint_(hint) {}
+
+  ~ExternalBufferAdapter() override {
+    if (finalize_cb_) finalize_cb_(env_, data_, finalize_hint_);
+  }
+
+  size_t size() const override { return len_; }
+  uint8_t *data() override { return data_; }
+
+private:
+  js_env_t *env_;
+  uint8_t *data_;
+  size_t len_;
+  js_finalize_cb finalize_cb_;
+  void *finalize_hint_;
+};
+}
+
+extern "C" int
+js_create_arraybuffer(js_env_t *env, size_t len, void **data, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto buf = std::make_shared<OwnedBuffer>(len);
+  // Stash data ptr BEFORE moving the shared_ptr into ArrayBuffer;
+  // the JSI ArrayBuffer ctor stores its own shared_ptr to the
+  // buffer, but the underlying vector storage stays alive as long
+  // as either holds a reference.
+  if (data) *data = buf->data();
+  auto ab = jsi::ArrayBuffer(rt, buf);
+  *result = adopt_value(env, jsi::Value(rt, ab));
+  return 0;
+}
+
+extern "C" int
+js_create_external_arraybuffer(js_env_t *env, void *data, size_t len, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto buf = std::make_shared<ExternalBufferAdapter>(env, data, len, finalize_cb, finalize_hint);
+  auto ab = jsi::ArrayBuffer(rt, buf);
+  *result = adopt_value(env, jsi::Value(rt, ab));
+  return 0;
+}
+
+extern "C" int
+js_get_arraybuffer_info(js_env_t *env, js_value_t *arraybuffer, void **data, size_t *len) {
+  auto &rt = *env->runtime;
+  auto ab = arraybuffer->value.asObject(rt).getArrayBuffer(rt);
+  if (data) *data = ab.data(rt);
+  if (len)  *len  = ab.size(rt);
+  return 0;
+}
+
+extern "C" int
+js_is_arraybuffer(js_env_t *env, js_value_t *value, bool *result) {
+  auto &rt = *env->runtime;
+  if (!value->value.isObject()) { *result = false; return 0; }
+  *result = value->value.asObject(rt).isArrayBuffer(rt);
+  return 0;
+}
+
+extern "C" int
+js_is_external(js_env_t *env, js_value_t *value, bool *result) {
+  auto &rt = *env->runtime;
+  if (!value->value.isObject()) { *result = false; return 0; }
+  auto obj = value->value.asObject(rt);
+  // Match if it has a NativeState that's ours. JSI doesn't
+  // distinguish "any NativeState" from "our ExternalState" — for
+  // now any HostObject-via-NativeState reads as external.
+  *result = obj.hasNativeState<ExternalState>(rt);
+  return 0;
+}
