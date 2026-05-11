@@ -442,16 +442,28 @@ js_create_function(js_env_t *env, const char *name, size_t len, js_function_cb c
 
   // paramCount is advisory — JS callers can pass any number of args
   // regardless. Pass 0 so JSI doesn't impose an arity check.
+  // Capture the function name for stderr tracing (debug aid; see
+  // the fprintf inside the lambda).
+  std::string capturedName = fn_name;
   auto fn = jsi::Function::createFromHostFunction(
     rt, prop_name, 0,
     // Lambda captures the user's C callback + data. Each invocation
     // builds a js_callback_info_s on the stack and dispatches.
-    [env, cb, data](
+    [env, cb, data, capturedName](
       jsi::Runtime &rt,
       const jsi::Value &thisVal,
       const jsi::Value *args,
       size_t count
     ) -> jsi::Value {
+      // TEMPORARY trace: log every host-fn invocation so we can see
+      // which native bindings JS is calling. Remove once timer flow
+      // is understood.
+      {
+        static int _hostfn_count = 0;
+        if (++_hostfn_count % 50 == 0 || _hostfn_count <= 5) {
+          fprintf(stderr, "[libhermes-trace] hostfn #%d: %s\n", _hostfn_count, capturedName.c_str());
+        }
+      }
       js_callback_info_s info{env, &thisVal, args, count, data};
       js_value_t *ret = cb(env, &info);
 
