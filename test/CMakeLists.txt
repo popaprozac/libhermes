@@ -22,6 +22,7 @@ list(APPEND tests
   define-properties
   wrap-unwrap
   chained-class-assign
+  cjs-loader-pattern
 )
 
 foreach(test IN LISTS tests)
