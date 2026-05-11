@@ -1858,8 +1858,22 @@ js_get_bindings(js_env_t *env, js_value_t **result) {
 
 extern "C" int
 js_get_platform_limits(js_platform_t *platform, js_platform_limits_t *result) {
-  (void) platform; (void) result;
-  // Optional info; bare doesn't fail without it.
+  (void) platform;
+  // bare-buffer reads these limits at runtime startup and exposes
+  // them as `binding.constants.MAX_LENGTH` (used by Buffer.alloc /
+  // Buffer.allocUnsafe to bounds-check requested sizes). Leaving
+  // them at 0 made every Buffer allocation throw
+  // "Buffer length must be at most 0".
+  //
+  // Hermes' typed-array byte length is stored in 32-bit fields
+  // (uint32 byteLength) — its real max is INT32_MAX (~2 GB).
+  // We report the same; matches what bare-buffer expects from
+  // engines with conservative limits and is the safe headroom.
+  // String length: same 32-bit upper bound.
+  if (result) {
+    result->arraybuffer_length = 0x7fffffff;
+    result->string_length      = 0x7fffffff;
+  }
   return 0;
 }
 
