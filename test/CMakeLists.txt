@@ -40,3 +40,21 @@ endforeach()
 # help — DISABLED skips it entirely; run it manually via
 # `./build/test/run-zapp-worker <path/to/bundle>`).
 set_tests_properties(run-zapp-worker PROPERTIES DISABLED TRUE)
+
+add_executable(test-bare-wrapped test-bare-wrapped.c)
+target_link_libraries(test-bare-wrapped PRIVATE js_static)
+
+# uv-timer-fires — smoke test that a vanilla uv_timer_t fires when
+# the loop is shared with libhermes' js_env. Narrows whether
+# "setInterval not firing" is a uv-vs-Hermes interaction problem
+# or somewhere higher up the stack.
+add_executable(uv-timer-fires uv-timer-fires.c)
+target_link_libraries(uv-timer-fires PRIVATE js_static)
+add_test(NAME uv-timer-fires COMMAND uv-timer-fires)
+
+# uv-timer-via-env — tighter repro that mimics bare-timers exactly:
+# js_get_env_loop → uv_timer_init on that loop → C callback that
+# calls back into JS via js_call_function → uv_run.
+add_executable(uv-timer-via-env uv-timer-via-env.c)
+target_link_libraries(uv-timer-via-env PRIVATE js_static)
+add_test(NAME uv-timer-via-env COMMAND uv-timer-via-env)
