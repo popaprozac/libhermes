@@ -356,6 +356,23 @@ js_get_global(js_env_t *env, js_value_t **result) {
 
 extern "C" int
 js_set_named_property(js_env_t *env, js_value_t *object, const char *name, js_value_t *value) {
+  // Bare's native addon init code (e.g. bare-hrtime/binding.c) and
+  // bare's runtime.c routinely do
+  //   js_create_function(... &val);
+  //   assert(err == 0);
+  //   js_set_named_property(exports, name, val);
+  // With NDEBUG the assert is a no-op, so a stubbed creator that
+  // returns -1 leaves `val` uninitialized — the next setProperty
+  // then SEGVs inside Hermes' slot allocator on a corrupt
+  // receiver. Defensive guard: refuse the call cleanly and stderr
+  // so the bug surfaces visibly instead of as an opaque
+  // EXC_BAD_ACCESS deep in Hermes.
+  if (object == nullptr || value == nullptr) {
+    fprintf(stderr, "[libhermes] js_set_named_property(name=%s) called with %s — "
+                    "an upstream creator likely returned -1 with *result unset\n",
+      name, object == nullptr ? "NULL object" : "NULL value");
+    return -1;
+  }
   auto &rt = *env->runtime;
   auto obj = object->value.asObject(rt);
   obj.setProperty(rt, name, jsi::Value(rt, value->value));
@@ -410,6 +427,29 @@ js_create_function(js_env_t *env, const char *name, size_t len, js_function_cb c
 
   *result = adopt_value(env, jsi::Value(rt, fn));
   return 0;
+}
+
+// js_create_typed_function — same surface as js_create_function
+// plus a typed-call fast path. The fast path lets engines skip
+// the generic JS calling convention when they recognize the
+// signature (V8 and JSC implement it via Fast API Calls). Hermes
+// has no equivalent, so we fall through to the regular untyped
+// function. Bare callers like bare-hrtime get a working function
+// (just without the typed fast path); the JS-visible behavior is
+// identical.
+extern "C" int
+js_create_typed_function(
+    js_env_t *env,
+    const char *name,
+    size_t len,
+    js_function_cb cb,
+    const js_callback_signature_t *signature,
+    const void *address,
+    void *data,
+    js_value_t **result) {
+  (void) signature;
+  (void) address;
+  return js_create_function(env, name, len, cb, data, result);
 }
 
 extern "C" int
@@ -1868,7 +1908,14 @@ js_create_function_with_source(
     return -1;
   }
 }
-STUB(js_create_typed_function, js_env_t*, const char*, size_t, js_function_cb, const js_callback_signature_t*, const void*, void*, js_value_t**)
+// Real impl below — falls back to the untyped path. We DO NOT
+// want this stubbed: bare's native addons (e.g. bare-hrtime) call
+// js_create_typed_function with `assert(err == 0)` followed
+// immediately by `js_set_named_property(exports, name, val)`.
+// With asserts no-op'd in Release and the stub returning -1, val
+// is uninitialized garbage, and the next setProperty crashes
+// Hermes' GC slot allocator on what looks like a corrupt
+// receiver. Took a full-stack debug session to track that down.
 STUB(js_get_typed_callback_info, const js_typed_callback_info_t*, js_env_t**, void**)
 STUB(js_terminate_execution, js_env_t*)
 STUB(js_fatal_exception,     js_env_t*, js_value_t*)
