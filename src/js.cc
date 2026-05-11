@@ -544,6 +544,18 @@ extern "C" int
 js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size_t argc, js_value_t *const argv[], js_value_t **result) {
   auto &rt = *env->runtime;
 
+  // TEMPORARY trace: log every 100th call so we can see whether
+  // libuv-driven callbacks (timers, async, etc.) are firing. During
+  // bootstrap js_call_function is hit ~hundreds of times; after
+  // bootstrap, ticks should add 1 every interval. Remove once
+  // timers are confirmed working.
+  {
+    static int _count = 0;
+    if (++_count % 100 == 0) {
+      fprintf(stderr, "[libhermes-trace] js_call_function called %d times\n", _count);
+    }
+  }
+
   // Defensive: bare's bootstrap will happily call `js_call_function`
   // with a NULL callee if an earlier stub returned -1 without bare
   // checking the error code. Crashing here makes the bug invisible
