@@ -103,6 +103,18 @@ struct js_value_s {
   HermesRuntime *runtime;
 };
 
+// Per-invocation context handed to host C callbacks via
+// `js_get_callback_info`. Lives on the stack of the JSI lambda
+// (see `js_create_function`); the C callback is only allowed to
+// read it during its own execution.
+struct js_callback_info_s {
+  js_env_t *env;
+  const jsi::Value *thisVal;
+  const jsi::Value *args;
+  size_t argc;
+  void *data; // user data pointer captured at js_create_function time
+};
+
 // === Stub macros =====================================================
 //
 // Until each function is implemented, return -1 to make missing
@@ -280,19 +292,130 @@ js_set_named_property(js_env_t *env, js_value_t *object, const char *name, js_va
 
 extern "C" int
 js_create_function(js_env_t *env, const char *name, size_t len, js_function_cb cb, void *data, js_value_t **result) {
-  (void) env; (void) name; (void) len; (void) cb; (void) data; (void) result;
-  // TODO: jsi::Function::createFromHostFunction with a lambda that
-  // wraps the C callback. Needs js_callback_info_t materialization
-  // and ArgsConverter machinery — punt to its own commit.
-  NOT_IMPL("js_create_function");
+  auto &rt = *env->runtime;
+  // jsi::PropNameID requires a length-bounded UTF-8 string. `len`
+  // from the C API can be SIZE_MAX (NAPI convention for "use
+  // strlen") or 0 (meaning "name is unused / empty"); normalize.
+  std::string fn_name = (name && len != static_cast<size_t>(-1))
+    ? std::string(name, len)
+    : (name ? std::string(name) : std::string("anonymous"));
+  auto prop_name = jsi::PropNameID::forUtf8(rt, fn_name);
+
+  // paramCount is advisory — JS callers can pass any number of args
+  // regardless. Pass 0 so JSI doesn't impose an arity check.
+  auto fn = jsi::Function::createFromHostFunction(
+    rt, prop_name, 0,
+    // Lambda captures the user's C callback + data. Each invocation
+    // builds a js_callback_info_s on the stack and dispatches.
+    [env, cb, data](
+      jsi::Runtime &rt,
+      const jsi::Value &thisVal,
+      const jsi::Value *args,
+      size_t count
+    ) -> jsi::Value {
+      (void) rt;
+      js_callback_info_s info{env, &thisVal, args, count, data};
+      js_value_t *ret = cb(env, &info);
+      if (ret == nullptr) {
+        // C callback returned nothing — coerce to undefined.
+        return jsi::Value::undefined();
+      }
+      // Move the returned value out of the handle scope so the C
+      // caller's scope-close doesn't trip on it being aliased.
+      // jsi::Value is move-only; we steal its contents and return.
+      return std::move(ret->value);
+    }
+  );
+
+  *result = adopt_value(env, jsi::Value(rt, fn));
+  return 0;
+}
+
+extern "C" int
+js_get_callback_info(js_env_t *env, const js_callback_info_t *info, size_t *argc, js_value_t *argv[], js_value_t **receiver, void **data) {
+  auto &rt = *env->runtime;
+
+  // Args: when argc != null AND argv != null, copy up to *argc args
+  // into argv, then set *argc to actual count. NAPI semantics.
+  if (argc != nullptr) {
+    size_t want = *argc;
+    size_t have = info->argc;
+    size_t to_copy = (have < want) ? have : want;
+    if (argv != nullptr) {
+      for (size_t i = 0; i < to_copy; i++) {
+        // Construct a new js_value_s in the current scope mirroring
+        // the i-th argument. JSI args are alive for the duration of
+        // the callback, but we don't want to leak references into
+        // the C ABI, so copy via jsi::Value's copy constructor
+        // (which takes a Runtime& and a Value&).
+        argv[i] = adopt_value(env, jsi::Value(rt, info->args[i]));
+      }
+      // Pad remaining slots with undefined for safety.
+      for (size_t i = to_copy; i < want; i++) {
+        argv[i] = adopt_value(env, jsi::Value::undefined());
+      }
+    }
+    *argc = have;
+  }
+
+  if (receiver != nullptr) {
+    *receiver = adopt_value(env, jsi::Value(rt, *info->thisVal));
+  }
+
+  if (data != nullptr) {
+    *data = info->data;
+  }
+
+  return 0;
 }
 
 extern "C" int
 js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size_t argc, js_value_t *const argv[], js_value_t **result) {
-  (void) env; (void) receiver; (void) function; (void) argc; (void) argv; (void) result;
-  // TODO: jsi::Function::callWithThis. Needs argv → jsi::Value[]
-  // marshalling. Pairs with js_create_function on next commit.
-  NOT_IMPL("js_call_function");
+  auto &rt = *env->runtime;
+
+  // Resolve the callee — must be a jsi::Function (an Object that
+  // passes Function::isFunction). asObject() throws JSError
+  // otherwise; we let that propagate for now and capture it via
+  // the uncaught-exception path once that's wired.
+  auto fn = function->value.asObject(rt).asFunction(rt);
+
+  // Marshal C-side argv into a JSI-side Value[]. jsi::Function::call*
+  // wants a `const Value*` plus count; allocate on the stack for
+  // small calls, heap otherwise. Bare's host functions in practice
+  // never exceed a handful of args.
+  constexpr size_t INLINE_ARGS = 8;
+  jsi::Value inline_args[INLINE_ARGS];
+  std::vector<jsi::Value> heap_args;
+  jsi::Value *jargs = inline_args;
+  if (argc > INLINE_ARGS) {
+    heap_args.reserve(argc);
+    for (size_t i = 0; i < argc; i++) {
+      heap_args.emplace_back(rt, argv[i]->value);
+    }
+    jargs = heap_args.data();
+  } else {
+    for (size_t i = 0; i < argc; i++) {
+      jargs[i] = jsi::Value(rt, argv[i]->value);
+    }
+  }
+
+  // Cast to `const jsi::Value*` to bind the non-template
+  // `call(rt, const Value*, size_t)` / `callWithThis(rt, Object, const Value*, size_t)`
+  // overloads. Without the const, Hermes' variadic template
+  // overload wins resolution and tries to convert (Value*, size_t)
+  // into JS args directly.
+  const jsi::Value *cjargs = jargs;
+  jsi::Value out;
+  if (receiver != nullptr) {
+    out = fn.callWithThis(rt, receiver->value.asObject(rt), cjargs, argc);
+  } else {
+    out = fn.call(rt, cjargs, argc);
+  }
+
+  if (result != nullptr) {
+    *result = adopt_value(env, std::move(out));
+  }
+  return 0;
 }
 
 extern "C" int

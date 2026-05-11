@@ -13,6 +13,7 @@
 
 list(APPEND tests
   eval-script
+  host-function
 )
 
 foreach(test IN LISTS tests)
