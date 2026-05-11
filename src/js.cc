@@ -1620,8 +1620,21 @@ js_get_platform_limits(js_platform_t *platform, js_platform_limits_t *result) {
 // This block makes the integration *link* and lets us iterate from
 // runtime crashes instead of speculation.
 
+// Stubs trace each call to stderr on first hit so we can see which
+// part of bare's bootstrap is reaching for an unimplemented API.
+// Per-call once-flag (static bool) keeps the log noise bounded.
+//
+// Logging on every call would hide useful info under repeated lines;
+// once-per-stub gives us the bootstrap shape in one pass.
 #define STUB(name, ...) \
-  extern "C" int name(__VA_ARGS__) { return -1; }
+  extern "C" int name(__VA_ARGS__) { \
+    static bool _logged_##name = false; \
+    if (!_logged_##name) { \
+      fprintf(stderr, "[libhermes-stub] %s\n", #name); \
+      _logged_##name = true; \
+    } \
+    return -1; \
+  }
 
 // Modules
 STUB(js_create_module,           js_env_t*, const char*, size_t, int, js_value_t*, js_module_meta_cb, void*, js_module_t**)
