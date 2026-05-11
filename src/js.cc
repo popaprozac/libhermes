@@ -519,9 +519,22 @@ js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size
     // Always log the JSError on its way through — even when
     // on_uncaught is set, the upstream handler may swallow it and
     // we want a breadcrumb in stderr to diagnose bootstrap-time
-    // issues like the bare.js exception path.
-    fprintf(stderr, "[libhermes] JSError in js_call_function: %s\n",
-      err.what());
+    // issues like the bare.js exception path. err.what() can be
+    // empty when the thrown value isn't a typical Error object
+    // (e.g. `throw 'string'` or `throw {custom}`); in that case
+    // stringify err.value() so we still get something useful.
+    {
+      std::string msg = err.what() ? err.what() : "";
+      if (msg.empty()) {
+        try {
+          msg = err.value().toString(rt).utf8(rt);
+        } catch (...) {
+          msg = "<non-stringifiable value>";
+        }
+      }
+      fprintf(stderr, "[libhermes] JSError in js_call_function: %s\n",
+        msg.c_str());
+    }
     js_value_t *errv = adopt_value(env, jsi::Value(rt, err.value()));
     if (env->on_uncaught && !env->in_uncaught) {
       env->in_uncaught = true;
