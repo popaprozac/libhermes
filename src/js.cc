@@ -460,7 +460,11 @@ js_create_function(js_env_t *env, const char *name, size_t len, js_function_cb c
       // is understood.
       {
         static int _hostfn_count = 0;
-        if (++_hostfn_count % 50 == 0 || _hostfn_count <= 5) {
+        ++_hostfn_count;
+        // Log everything past bootstrap (first ~100 calls) — that's
+        // where we want to see WHICH bindings fire on a wall-clock
+        // periodic basis.
+        if (_hostfn_count > 100 && _hostfn_count <= 200) {
           fprintf(stderr, "[libhermes-trace] hostfn #%d: %s\n", _hostfn_count, capturedName.c_str());
         }
       }
