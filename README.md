@@ -28,15 +28,15 @@ Concrete wins:
 
 ## Status
 
-**Phase 1: complete + most of Phase 2 surface.** Seven end-to-end
-tests pass against Hermes:
+**Phase 1 complete + structural Phase 2.** Nine end-to-end tests
+pass against Hermes:
 
 ```
 $ bun install
 $ cmake -B build && cmake --build build -j4
 $ for t in eval-script host-function global-host-binding \
            data-roundtrip exception-flow arraybuffer-roundtrip \
-           promise-flow; do
+           promise-flow define-properties wrap-unwrap; do
     ./build/test/$t || break
   done
 ```
@@ -58,13 +58,24 @@ Functional coverage:
 | externals (NativeState-backed void*) | ✅ |
 | ArrayBuffer (owned + external, info/is) | ✅ |
 | promises (create + resolve/reject + microtask drain) | ✅ |
+| property descriptors (define_properties) | ✅ |
+| property name iteration (get_property_names) | ✅ |
+| wrap / unwrap (class-style C↔JS binding) | ✅ |
 | BigInt | ✗ |
 | Symbol, Date, RegExp details | ✗ |
 | Module loading (Module/SyntheticModule) | ✗ |
 | TypedArray / DataView | ✗ |
-| Wrap / unwrap (class-style C↔JS binding) | ✗ |
-| Property descriptors (define_properties) | ✗ |
 | Threadsafe functions (libuv ↔ JS) | ✗ |
+
+The covered surface is enough to host the majority of bare-* native
+modules. Remaining gaps are real but specific to use cases: module
+loading for bare-module proper, threadsafe functions for libuv-async
+callbacks, TypedArray for some bare-buffer fast paths, BigInt for
+exact 64-bit ints.
+
+`src/js.cc` is ~1240 LOC; the libqjs reference is ~6500 LOC so we're
+roughly 20% of full coverage. The 20% covered is the load-bearing
+80% of typical native-module bindings.
 
 Planned phases:
 
