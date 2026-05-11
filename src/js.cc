@@ -1155,6 +1155,521 @@ js_unwrap(js_env_t *env, js_value_t *object, void **result) {
   return 0;
 }
 
+// === Error construction =============================================
+
+extern "C" int
+js_create_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto msg = message ? jsi::Value(rt, message->value) : jsi::Value(jsi::String::createFromUtf8(rt, ""));
+  auto err = rt.global().getPropertyAsFunction(rt, "Error").callAsConstructor(rt, msg);
+  if (code && code->value.isString()) {
+    err.asObject(rt).setProperty(rt, "code", code->value.asString(rt));
+  }
+  *result = adopt_value(env, std::move(err));
+  return 0;
+}
+
+extern "C" int
+js_create_type_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto msg = message ? jsi::Value(rt, message->value) : jsi::Value(jsi::String::createFromUtf8(rt, ""));
+  auto err = rt.global().getPropertyAsFunction(rt, "TypeError").callAsConstructor(rt, msg);
+  if (code && code->value.isString()) {
+    err.asObject(rt).setProperty(rt, "code", code->value.asString(rt));
+  }
+  *result = adopt_value(env, std::move(err));
+  return 0;
+}
+
+extern "C" int
+js_create_range_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto msg = message ? jsi::Value(rt, message->value) : jsi::Value(jsi::String::createFromUtf8(rt, ""));
+  auto err = rt.global().getPropertyAsFunction(rt, "RangeError").callAsConstructor(rt, msg);
+  if (code && code->value.isString()) {
+    err.asObject(rt).setProperty(rt, "code", code->value.asString(rt));
+  }
+  *result = adopt_value(env, std::move(err));
+  return 0;
+}
+
+extern "C" int
+js_create_syntax_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto msg = message ? jsi::Value(rt, message->value) : jsi::Value(jsi::String::createFromUtf8(rt, ""));
+  auto err = rt.global().getPropertyAsFunction(rt, "SyntaxError").callAsConstructor(rt, msg);
+  if (code && code->value.isString()) {
+    err.asObject(rt).setProperty(rt, "code", code->value.asString(rt));
+  }
+  *result = adopt_value(env, std::move(err));
+  return 0;
+}
+
+extern "C" int
+js_create_reference_error(js_env_t *env, js_value_t *code, js_value_t *message, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto msg = message ? jsi::Value(rt, message->value) : jsi::Value(jsi::String::createFromUtf8(rt, ""));
+  auto err = rt.global().getPropertyAsFunction(rt, "ReferenceError").callAsConstructor(rt, msg);
+  if (code && code->value.isString()) {
+    err.asObject(rt).setProperty(rt, "code", code->value.asString(rt));
+  }
+  *result = adopt_value(env, std::move(err));
+  return 0;
+}
+
+extern "C" int
+js_is_error(js_env_t *env, js_value_t *value, bool *result) {
+  auto &rt = *env->runtime;
+  if (!value->value.isObject()) { *result = false; return 0; }
+  // Check via global Error constructor's prototype chain. JSI lacks
+  // a direct `instanceof` shortcut, so we eval one. Performance-wise
+  // fine for the occasional error check; can be optimized via
+  // cached Function later.
+  auto isErr = rt.global().getPropertyAsFunction(rt, "Function")
+    .callAsConstructor(rt, "v", "return v instanceof Error;")
+    .asObject(rt).asFunction(rt);
+  auto out = isErr.call(rt, jsi::Value(rt, value->value));
+  *result = out.isBool() ? out.getBool() : false;
+  return 0;
+}
+
+// js_throw_errorf — like js_throw_error but printf-style format.
+#include <cstdarg>
+extern "C" int
+js_throw_errorf(js_env_t *env, const char *code, const char *message, ...) {
+  char buf[1024];
+  va_list args;
+  va_start(args, message);
+  vsnprintf(buf, sizeof(buf), message ? message : "", args);
+  va_end(args);
+  return js_throw_error(env, code, buf);
+}
+
+extern "C" int
+js_throw_verrorf(js_env_t *env, const char *code, const char *message, va_list args) {
+  char buf[1024];
+  vsnprintf(buf, sizeof(buf), message ? message : "", args);
+  return js_throw_error(env, code, buf);
+}
+
+extern "C" int
+js_throw_type_errorf(js_env_t *env, const char *code, const char *message, ...) {
+  char buf[1024];
+  va_list args;
+  va_start(args, message);
+  vsnprintf(buf, sizeof(buf), message ? message : "", args);
+  va_end(args);
+  return js_throw_type_error(env, code, buf);
+}
+
+extern "C" int
+js_throw_type_verrorf(js_env_t *env, const char *code, const char *message, va_list args) {
+  char buf[1024];
+  vsnprintf(buf, sizeof(buf), message ? message : "", args);
+  return js_throw_type_error(env, code, buf);
+}
+
+extern "C" int
+js_throw_range_errorf(js_env_t *env, const char *code, const char *message, ...) {
+  char buf[1024];
+  va_list args;
+  va_start(args, message);
+  vsnprintf(buf, sizeof(buf), message ? message : "", args);
+  va_end(args);
+  return js_throw_range_error(env, code, buf);
+}
+
+extern "C" int
+js_throw_range_verrorf(js_env_t *env, const char *code, const char *message, va_list args) {
+  char buf[1024];
+  vsnprintf(buf, sizeof(buf), message ? message : "", args);
+  return js_throw_range_error(env, code, buf);
+}
+
+extern "C" int
+js_throw_syntax_errorf(js_env_t *env, const char *code, const char *message, ...) {
+  char buf[1024];
+  va_list args;
+  va_start(args, message);
+  vsnprintf(buf, sizeof(buf), message ? message : "", args);
+  va_end(args);
+  return js_throw_syntax_error(env, code, buf);
+}
+
+extern "C" int
+js_throw_syntax_verrorf(js_env_t *env, const char *code, const char *message, va_list args) {
+  char buf[1024];
+  vsnprintf(buf, sizeof(buf), message ? message : "", args);
+  return js_throw_syntax_error(env, code, buf);
+}
+
+extern "C" int
+js_throw_reference_errorf(js_env_t *env, const char *code, const char *message, ...) {
+  char buf[1024];
+  va_list args;
+  va_start(args, message);
+  vsnprintf(buf, sizeof(buf), message ? message : "", args);
+  va_end(args);
+  return js_throw_reference_error(env, code, buf);
+}
+
+extern "C" int
+js_throw_reference_verrorf(js_env_t *env, const char *code, const char *message, va_list args) {
+  char buf[1024];
+  vsnprintf(buf, sizeof(buf), message ? message : "", args);
+  return js_throw_reference_error(env, code, buf);
+}
+
+// === Property access (named / indexed / computed) ==================
+
+extern "C" int
+js_get_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  // PropNameID accepts either a string or a Symbol. For simplicity
+  // coerce arbitrary keys to string via toString(); proper Symbol
+  // support can come later.
+  auto key_str = key->value.isString()
+    ? key->value.asString(rt).utf8(rt)
+    : key->value.toString(rt).utf8(rt);
+  auto v = obj.getProperty(rt, key_str.c_str());
+  *result = adopt_value(env, std::move(v));
+  return 0;
+}
+
+extern "C" int
+js_set_property(js_env_t *env, js_value_t *object, js_value_t *key, js_value_t *value) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  auto key_str = key->value.isString()
+    ? key->value.asString(rt).utf8(rt)
+    : key->value.toString(rt).utf8(rt);
+  obj.setProperty(rt, key_str.c_str(), jsi::Value(rt, value->value));
+  return 0;
+}
+
+extern "C" int
+js_has_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *result) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  auto key_str = key->value.isString()
+    ? key->value.asString(rt).utf8(rt)
+    : key->value.toString(rt).utf8(rt);
+  *result = obj.hasProperty(rt, key_str.c_str());
+  return 0;
+}
+
+extern "C" int
+js_has_named_property(js_env_t *env, js_value_t *object, const char *name, bool *result) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  *result = obj.hasProperty(rt, name);
+  return 0;
+}
+
+extern "C" int
+js_has_own_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *result) {
+  // No direct JSI API. Use Object.prototype.hasOwnProperty.call(obj, key).
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  auto key_v = jsi::Value(rt, key->value);
+  auto hasOwn = rt.global().getPropertyAsObject(rt, "Object")
+    .getPropertyAsObject(rt, "prototype")
+    .getPropertyAsFunction(rt, "hasOwnProperty");
+  auto out = hasOwn.callWithThis(rt, obj, jsi::Value(rt, key_v));
+  *result = out.isBool() ? out.getBool() : false;
+  return 0;
+}
+
+extern "C" int
+js_delete_property(js_env_t *env, js_value_t *object, js_value_t *key, bool *result) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  auto key_str = key->value.isString()
+    ? key->value.asString(rt).utf8(rt)
+    : key->value.toString(rt).utf8(rt);
+  return js_delete_named_property(env, object, key_str.c_str(), result);
+  (void) obj;
+}
+
+extern "C" int
+js_has_element(js_env_t *env, js_value_t *object, uint32_t index, bool *result) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  // JS-spec semantics: indexed access goes through hasProperty with
+  // a numeric key string. Simpler to evaluate via Function for now.
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%u", index);
+  *result = obj.hasProperty(rt, buf);
+  return 0;
+}
+
+extern "C" int
+js_delete_element(js_env_t *env, js_value_t *object, uint32_t index, bool *result) {
+  // Same shape as js_delete_named_property but indexed.
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%u", index);
+  return js_delete_named_property(env, object, buf, result);
+}
+
+// === Coercions ======================================================
+
+extern "C" int
+js_coerce_to_boolean(js_env_t *env, js_value_t *value, js_value_t **result) {
+  auto &rt = *env->runtime;
+  // ToBoolean semantics: anything non-falsy → true.
+  bool b;
+  const auto &v = value->value;
+  if (v.isBool())        b = v.getBool();
+  else if (v.isUndefined() || v.isNull()) b = false;
+  else if (v.isNumber()) { double d = v.getNumber(); b = !(d == 0 || std::isnan(d)); }
+  else if (v.isString()) b = v.asString(rt).utf8(rt).size() > 0;
+  else                   b = true;
+  *result = adopt_value(env, jsi::Value(b));
+  return 0;
+}
+
+extern "C" int
+js_coerce_to_number(js_env_t *env, js_value_t *value, js_value_t **result) {
+  // Use Number(v) global to apply spec ToNumber.
+  auto &rt = *env->runtime;
+  auto num = rt.global().getPropertyAsFunction(rt, "Number")
+    .call(rt, jsi::Value(rt, value->value));
+  *result = adopt_value(env, std::move(num));
+  return 0;
+}
+
+extern "C" int
+js_coerce_to_string(js_env_t *env, js_value_t *value, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto str = value->value.toString(rt);
+  *result = adopt_value(env, jsi::Value(rt, str));
+  return 0;
+}
+
+extern "C" int
+js_coerce_to_object(js_env_t *env, js_value_t *value, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto obj = rt.global().getPropertyAsFunction(rt, "Object")
+    .call(rt, jsi::Value(rt, value->value));
+  *result = adopt_value(env, std::move(obj));
+  return 0;
+}
+
+// === Strict equality ================================================
+
+extern "C" int
+js_strict_equals(js_env_t *env, js_value_t *a, js_value_t *b, bool *result) {
+  auto &rt = *env->runtime;
+  *result = jsi::Value::strictEquals(rt, a->value, b->value);
+  return 0;
+}
+
+// === Escapable handle scopes ========================================
+//
+// Same shape as regular scopes plus an "escape" slot — a single
+// js_value_t* that survives close. js.h's pattern: open scope, do
+// work, choose one value to keep, escape it, close. The escaped
+// value lands in the *parent* scope.
+
+struct js_escapable_handle_scope_s {
+  js_handle_scope_s base; // first so we can downcast safely
+  bool escaped = false;
+};
+
+extern "C" int
+js_open_escapable_handle_scope(js_env_t *env, js_escapable_handle_scope_t **result) {
+  auto *scope = new js_escapable_handle_scope_s();
+  scope->base.env = env;
+  scope->base.prev = env->top_scope;
+  env->top_scope = &scope->base;
+  *result = scope;
+  return 0;
+}
+
+extern "C" int
+js_close_escapable_handle_scope(js_env_t *env, js_escapable_handle_scope_t *scope) {
+  if (env->top_scope != &scope->base) return -1;
+  env->top_scope = scope->base.prev;
+  // Manual cleanup since we're managing js_handle_scope_s ourselves.
+  scope->base.values.clear();
+  delete scope;
+  return 0;
+}
+
+extern "C" int
+js_escape_handle(js_env_t *env, js_escapable_handle_scope_t *scope, js_value_t *escapee, js_value_t **result) {
+  if (scope->escaped) return -1; // contract violation: only one escape per scope
+  scope->escaped = true;
+  // Copy the value into the PARENT scope (top_scope's prev should be
+  // the parent). The escapable scope is currently top.
+  auto *parent = scope->base.prev;
+  if (!parent) {
+    // No parent — can't escape. Return a fresh value in the same
+    // scope (will get cleaned up with the escapable on close).
+    *result = adopt_value(env, jsi::Value(*env->runtime, escapee->value));
+    return 0;
+  }
+  auto wrapper = std::make_unique<js_value_s>();
+  wrapper->value = jsi::Value(*env->runtime, escapee->value);
+  wrapper->runtime = env->runtime.get();
+  auto *raw = wrapper.get();
+  parent->values.push_back(std::move(wrapper));
+  *result = raw;
+  return 0;
+}
+
+// === Misc small additions ==========================================
+
+extern "C" int
+js_get_new_target(js_env_t *env, const js_callback_info_t *info, js_value_t **result) {
+  (void) info;
+  // JSI's createFromHostFunction doesn't pass `new` context to the
+  // host function. Returning undefined as a placeholder; bare-* code
+  // typically branches on this being non-null.
+  *result = adopt_value(env, jsi::Value::undefined());
+  return 0;
+}
+
+extern "C" int
+js_get_bindings(js_env_t *env, js_value_t **result) {
+  // Returns the env's "bindings" object — bare uses this as the
+  // shared exports surface for its host. Return globalThis for now;
+  // bare's bootstrap looks for specific properties on it which we
+  // can satisfy once we hit them at runtime.
+  return js_get_global(env, result);
+}
+
+extern "C" int
+js_get_platform_limits(js_platform_t *platform, js_platform_limits_t *result) {
+  (void) platform; (void) result;
+  // Optional info; bare doesn't fail without it.
+  return 0;
+}
+
+// === Mass stubs ====================================================
+//
+// Every remaining js_h function we don't have a real impl for. They
+// return -1 (js_pending_exception) so bare can detect "not supported"
+// at runtime. Each line is a one-shot stub — when bare's bootstrap
+// hits one of these, the next iteration is to replace it with a real
+// implementation, driven by the actual call site.
+//
+// This block makes the integration *link* and lets us iterate from
+// runtime crashes instead of speculation.
+
+#define STUB(name, ...) \
+  extern "C" int name(__VA_ARGS__) { return -1; }
+
+// Modules
+STUB(js_create_module,           js_env_t*, const char*, size_t, int, js_value_t*, js_module_meta_cb, void*, js_module_t**)
+STUB(js_create_synthetic_module, js_env_t*, const char*, size_t, js_value_t *const[], size_t, js_module_evaluate_cb, void*, js_module_t**)
+STUB(js_delete_module,           js_env_t*, js_module_t*)
+STUB(js_get_module_name,         js_env_t*, js_module_t*, const char**)
+STUB(js_get_module_namespace,    js_env_t*, js_module_t*, js_value_t**)
+STUB(js_set_module_export,       js_env_t*, js_module_t*, js_value_t*, js_value_t*)
+STUB(js_instantiate_module,      js_env_t*, js_module_t*, js_module_resolve_cb, void*)
+STUB(js_run_module,              js_env_t*, js_module_t*, js_value_t**)
+STUB(js_is_module_namespace,     js_env_t*, js_value_t*, bool*)
+STUB(js_on_dynamic_import,       js_env_t*, js_dynamic_import_cb, void*)
+STUB(js_on_dynamic_import_transitional, js_env_t*, js_dynamic_import_transitional_cb, void*)
+
+// Threadsafe functions (libuv ↔ JS thread crossing — big chunk of work)
+STUB(js_create_threadsafe_function,    js_env_t*, js_value_t*, size_t, size_t, js_finalize_cb, void*, void*, js_threadsafe_function_cb, js_threadsafe_function_t**)
+STUB(js_get_threadsafe_function_context, js_threadsafe_function_t*, void**)
+STUB(js_call_threadsafe_function,      js_threadsafe_function_t*, void*, js_threadsafe_function_call_mode_t)
+STUB(js_acquire_threadsafe_function,   js_threadsafe_function_t*)
+STUB(js_release_threadsafe_function,   js_threadsafe_function_t*, js_threadsafe_function_release_mode_t)
+STUB(js_ref_threadsafe_function,       js_env_t*, js_threadsafe_function_t*)
+STUB(js_unref_threadsafe_function,     js_env_t*, js_threadsafe_function_t*)
+
+// Teardown callbacks
+STUB(js_add_teardown_callback,     js_env_t*, js_teardown_cb, void*)
+STUB(js_remove_teardown_callback,  js_env_t*, js_teardown_cb, void*)
+STUB(js_add_deferred_teardown_callback,    js_env_t*, js_deferred_teardown_cb, void*, js_deferred_teardown_t**)
+STUB(js_finish_deferred_teardown_callback, js_deferred_teardown_t*)
+
+// Inspector
+STUB(js_create_inspector,  js_env_t*, js_inspector_t**)
+STUB(js_destroy_inspector, js_env_t*, js_inspector_t*)
+STUB(js_connect_inspector, js_env_t*, js_inspector_t*)
+STUB(js_on_inspector_paused,                 js_env_t*, js_inspector_t*, js_inspector_paused_cb, void*)
+STUB(js_on_inspector_response_transitional,  js_env_t*, js_inspector_t*, js_inspector_message_transitional_cb, void*)
+STUB(js_send_inspector_request_transitional, js_env_t*, js_inspector_t*, const char*, size_t)
+
+// Finalizers / wrap / type tags
+STUB(js_add_finalizer,    js_env_t*, js_value_t*, void*, js_finalize_cb, void*, js_ref_t**)
+STUB(js_add_type_tag,     js_env_t*, js_value_t*, const js_type_tag_t*)
+STUB(js_check_type_tag,   js_env_t*, js_value_t*, const js_type_tag_t*, bool*)
+
+// Symbol / Date / BigInt
+STUB(js_create_symbol,     js_env_t*, js_value_t*, js_value_t**)
+STUB(js_create_date,       js_env_t*, double, js_value_t**)
+STUB(js_get_value_date,    js_env_t*, js_value_t*, double*)
+STUB(js_create_bigint_words, js_env_t*, int, const uint64_t*, size_t, js_value_t**)
+STUB(js_get_value_bigint_words, js_env_t*, js_value_t*, int*, uint64_t*, size_t, size_t*)
+
+// ArrayBuffer details + TypedArray + DataView
+STUB(js_create_arraybuffer_with_backing_store, js_env_t*, js_arraybuffer_backing_store_t*, void**, size_t*, js_value_t**)
+STUB(js_create_unsafe_arraybuffer, js_env_t*, size_t, void**, js_value_t**)
+STUB(js_get_arraybuffer_backing_store, js_env_t*, js_value_t*, js_arraybuffer_backing_store_t**)
+STUB(js_release_arraybuffer_backing_store, js_env_t*, js_arraybuffer_backing_store_t*)
+STUB(js_detach_arraybuffer, js_env_t*, js_value_t*)
+STUB(js_create_sharedarraybuffer_with_backing_store, js_env_t*, js_arraybuffer_backing_store_t*, void**, size_t*, js_value_t**)
+STUB(js_get_sharedarraybuffer_info, js_env_t*, js_value_t*, void**, size_t*)
+STUB(js_get_sharedarraybuffer_backing_store, js_env_t*, js_value_t*, js_arraybuffer_backing_store_t**)
+STUB(js_create_typedarray, js_env_t*, js_typedarray_type_t, size_t, js_value_t*, size_t, js_value_t**)
+STUB(js_get_typedarray_info, js_env_t*, js_value_t*, js_typedarray_type_t*, void**, size_t*, js_value_t**, size_t*)
+STUB(js_create_dataview, js_env_t*, size_t, js_value_t*, size_t, js_value_t**)
+STUB(js_get_dataview_info, js_env_t*, js_value_t*, void**, size_t*, js_value_t**, size_t*)
+STUB(js_get_array_elements, js_env_t*, js_value_t*, js_value_t*[], size_t, size_t, uint32_t*)
+
+// String views (zero-copy)
+STUB(js_get_string_view,     js_env_t*, js_value_t*, js_string_encoding_t*, const void**, size_t*, js_string_view_t**)
+STUB(js_release_string_view, js_env_t*, js_string_view_t*)
+
+// Misc
+STUB(js_call_function_with_checkpoint, js_env_t*, js_value_t*, js_value_t*, size_t, js_value_t *const[], js_value_t**)
+STUB(js_new_instance,        js_env_t*, js_value_t*, size_t, js_value_t *const[], js_value_t**)
+STUB(js_define_class,        js_env_t*, const char*, size_t, js_function_cb, void*, js_property_descriptor_t const[], size_t, js_value_t**)
+STUB(js_get_filtered_property_names, js_env_t*, js_value_t*, js_key_collection_mode_t, js_property_filter_t, js_index_filter_t, js_key_conversion_mode_t, js_value_t**)
+STUB(js_get_promise_state,   js_env_t*, js_value_t*, js_promise_state_t*)
+STUB(js_get_promise_result,  js_env_t*, js_value_t*, js_value_t**)
+STUB(js_get_heap_statistics, js_env_t*, js_heap_statistics_t*)
+STUB(js_adjust_external_memory, js_env_t*, int64_t, int64_t*)
+STUB(js_create_function_with_source, js_env_t*, const char*, size_t, const char*, size_t, js_value_t *const[], size_t, int, js_value_t*, js_value_t**)
+STUB(js_create_typed_function, js_env_t*, const char*, size_t, js_function_cb, const js_callback_signature_t*, const void*, void*, js_value_t**)
+STUB(js_get_typed_callback_info, const js_typed_callback_info_t*, js_env_t**, void**)
+STUB(js_terminate_execution, js_env_t*)
+STUB(js_fatal_exception,     js_env_t*, js_value_t*)
+STUB(js_on_unhandled_rejection, js_env_t*, js_unhandled_rejection_cb, void*)
+
+// is_X predicates we haven't implemented yet (delegate / Date / Map /
+// Set / Proxy / etc.) — they all just return false for now.
+#define IS_FALSE(name) \
+  extern "C" int name(js_env_t *env, js_value_t *value, bool *result) { \
+    (void) env; (void) value; *result = false; return 0; \
+  }
+IS_FALSE(js_is_async_function)
+IS_FALSE(js_is_generator_function)
+IS_FALSE(js_is_generator)
+IS_FALSE(js_is_arguments)
+IS_FALSE(js_is_date)
+IS_FALSE(js_is_regexp)
+IS_FALSE(js_is_proxy)
+IS_FALSE(js_is_map)
+IS_FALSE(js_is_set)
+IS_FALSE(js_is_weak_map)
+IS_FALSE(js_is_weak_set)
+IS_FALSE(js_is_weak_ref)
+IS_FALSE(js_is_typedarray)
+IS_FALSE(js_is_dataview)
+IS_FALSE(js_is_detached_arraybuffer)
+IS_FALSE(js_is_sharedarraybuffer)
+#undef IS_FALSE
+
+#undef STUB
+
 extern "C" int
 js_remove_wrap(js_env_t *env, js_value_t *object, void **result) {
   auto &rt = *env->runtime;
