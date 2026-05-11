@@ -19,6 +19,7 @@ list(APPEND tests
   exception-flow
   arraybuffer-roundtrip
   promise-flow
+  define-properties
 )
 
 foreach(test IN LISTS tests)

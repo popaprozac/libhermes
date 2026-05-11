@@ -726,6 +726,89 @@ js_get_array_length(js_env_t *env, js_value_t *array, uint32_t *result) {
   return 0;
 }
 
+extern "C" int
+js_get_property_names(js_env_t *env, js_value_t *object, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  auto names = obj.getPropertyNames(rt);
+  *result = adopt_value(env, jsi::Value(rt, names));
+  return 0;
+}
+
+// js_define_properties — install a vector of {name, method/getter/setter/value}
+// descriptors onto an object. Used by every bare-* binding to set up
+// exports in one call.
+//
+// Three kinds of descriptor (matching js.h's struct, NAPI shape):
+//   - Method:   descriptor.method != nullptr → install as function-valued property
+//   - Accessor: descriptor.getter || .setter → install via Object.defineProperty
+//   - Value:    descriptor.value != nullptr  → plain property assignment
+//
+// Attributes (writable / enumerable / configurable) are advisory; JSI doesn't
+// expose them via setProperty. For accessors we go through the global
+// `Object.defineProperty` to set getter/setter; for methods/values we use
+// the fast `setProperty` path.
+extern "C" int
+js_define_properties(js_env_t *env, js_value_t *object, js_property_descriptor_t const properties[], size_t properties_len) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+
+  // Cache Object.defineProperty once per call for accessor descriptors.
+  jsi::Function defineProperty = rt.global()
+    .getPropertyAsObject(rt, "Object")
+    .getPropertyAsFunction(rt, "defineProperty");
+
+  for (size_t i = 0; i < properties_len; i++) {
+    const auto &p = properties[i];
+
+    // Resolve property name to a string. js.h allows it to be any
+    // js_value_t — for now we coerce via .toString() if it isn't
+    // already a string. (Symbol keys via Object.defineProperty
+    // would need similar handling.)
+    std::string name_str;
+    if (p.name->value.isString()) {
+      name_str = p.name->value.asString(rt).utf8(rt);
+    } else {
+      // toString coercion for non-string keys.
+      name_str = p.name->value.toString(rt).utf8(rt);
+    }
+
+    if (p.method != nullptr) {
+      js_value_t *fn_v;
+      if (js_create_function(env, name_str.c_str(), name_str.size(), p.method, p.data, &fn_v) != 0) {
+        return -1;
+      }
+      obj.setProperty(rt, name_str.c_str(), jsi::Value(rt, fn_v->value));
+    } else if (p.getter != nullptr || p.setter != nullptr) {
+      // Accessor: build a descriptor object {get, set, configurable: true}
+      // and call Object.defineProperty(obj, name, desc).
+      auto desc = jsi::Object(rt);
+      if (p.getter != nullptr) {
+        js_value_t *get_v;
+        if (js_create_function(env, "get", (size_t) -1, p.getter, p.data, &get_v) != 0) return -1;
+        desc.setProperty(rt, "get", jsi::Value(rt, get_v->value));
+      }
+      if (p.setter != nullptr) {
+        js_value_t *set_v;
+        if (js_create_function(env, "set", (size_t) -1, p.setter, p.data, &set_v) != 0) return -1;
+        desc.setProperty(rt, "set", jsi::Value(rt, set_v->value));
+      }
+      desc.setProperty(rt, "configurable", true);
+      defineProperty.call(rt,
+        jsi::Value(rt, obj),
+        jsi::String::createFromUtf8(rt, name_str),
+        jsi::Value(rt, desc)
+      );
+    } else if (p.value != nullptr) {
+      obj.setProperty(rt, name_str.c_str(), jsi::Value(rt, p.value->value));
+    }
+    // (No-op when all method/getter/setter/value are null —
+    // shouldn't happen in practice but doesn't crash.)
+  }
+
+  return 0;
+}
+
 // === Exception path =================================================
 //
 // js.h's NAPI-style convention: host functions set a "pending
