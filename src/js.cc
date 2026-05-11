@@ -274,6 +274,14 @@ js_close_handle_scope(js_env_t *env, js_handle_scope_t *scope) {
 
 extern "C" int
 js_create_string_utf8(js_env_t *env, const utf8_t *str, size_t len, js_value_t **result) {
+  // NAPI / js.h convention: `len == (size_t)-1` means the input is
+  // null-terminated and the caller wants us to discover the length.
+  // Bare's bootstrap passes this sentinel constantly — without the
+  // check we hand a ~SIZE_MAX length to Hermes' StringPrimitive,
+  // which immediately throws std::length_error → abort().
+  if (len == (size_t) -1) {
+    len = str ? std::strlen(reinterpret_cast<const char *>(str)) : 0;
+  }
   auto s = jsi::String::createFromUtf8(
     *env->runtime, reinterpret_cast<const uint8_t *>(str), len
   );
@@ -1716,6 +1724,12 @@ js_create_string_latin1(js_env_t *env, const latin1_t *str, size_t len, js_value
 
 extern "C" int
 js_create_string_utf16le(js_env_t *env, const utf16_t *str, size_t len, js_value_t **result) {
+  // NAPI convention: len == (size_t)-1 → null-terminated UTF-16.
+  if (len == (size_t) -1) {
+    size_t n = 0;
+    if (str) while (str[n]) n++;
+    len = n;
+  }
   // JSI doesn't have createFromUtf16 in the base interface;
   // we'd need Hermes-specific path. For now build via String.fromCharCode.
   // Optimize later when bare actually needs UTF-16 fast paths.
