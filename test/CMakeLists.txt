@@ -23,6 +23,7 @@ list(APPEND tests
   wrap-unwrap
   chained-class-assign
   cjs-loader-pattern
+  run-zapp-worker
 )
 
 foreach(test IN LISTS tests)
