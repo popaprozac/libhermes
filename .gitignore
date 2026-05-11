@@ -1,0 +1,17 @@
+# cmake-fetch / out-of-tree build directories
+build/
+build-*/
+
+# Node deps (cmake-fetch lives under node_modules/)
+node_modules/
+package-lock.json
+bun.lock
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Local zc / cmake experiments
+*.local.*

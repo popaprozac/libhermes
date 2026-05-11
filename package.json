@@ -1,0 +1,18 @@
+{
+  "private": true,
+  "name": "libhermes",
+  "description": "Bare engine binding for Meta's Hermes JavaScript engine.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/popaprozac/libhermes.git"
+  },
+  "author": "Zach Popaprozac",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/popaprozac/libhermes/issues"
+  },
+  "homepage": "https://github.com/popaprozac/libhermes#readme",
+  "devDependencies": {
+    "cmake-fetch": "^1.0.0"
+  }
+}
