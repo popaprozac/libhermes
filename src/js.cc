@@ -524,16 +524,36 @@ js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size
     // (e.g. `throw 'string'` or `throw {custom}`); in that case
     // stringify err.value() so we still get something useful.
     {
-      std::string msg = err.what() ? err.what() : "";
-      if (msg.empty()) {
+      const auto &val = err.value();
+      const char *kind =
+          val.isUndefined() ? "undefined"
+        : val.isNull()      ? "null"
+        : val.isBool()      ? "bool"
+        : val.isNumber()    ? "number"
+        : val.isString()    ? "string"
+        : val.isObject()    ? "object"
+        : "unknown";
+      std::string what = err.what() ? err.what() : "";
+      std::string vstr;
+      try { vstr = val.toString(rt).utf8(rt); }
+      catch (...) { vstr = "<toString threw>"; }
+      // If it's an Object, also try JSON.stringify so error objects
+      // show their properties (e.g. .message + .stack).
+      std::string json;
+      if (val.isObject()) {
         try {
-          msg = err.value().toString(rt).utf8(rt);
-        } catch (...) {
-          msg = "<non-stringifiable value>";
-        }
+          auto stringify = rt.global()
+            .getPropertyAsObject(rt, "JSON")
+            .getPropertyAsFunction(rt, "stringify");
+          auto out = stringify.call(rt, val);
+          json = out.toString(rt).utf8(rt);
+        } catch (...) {}
       }
-      fprintf(stderr, "[libhermes] JSError in js_call_function: %s\n",
-        msg.c_str());
+      fprintf(stderr, "[libhermes] JSError in js_call_function:\n"
+                      "    what  : %s\n"
+                      "    value : (%s) %s\n"
+                      "    json  : %s\n",
+        what.c_str(), kind, vstr.c_str(), json.c_str());
     }
     js_value_t *errv = adopt_value(env, jsi::Value(rt, err.value()));
     if (env->on_uncaught && !env->in_uncaught) {
