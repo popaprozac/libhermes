@@ -75,9 +75,20 @@ struct js_env_s {
   // pointers reference entries inside.
   js_handle_scope_t *top_scope = nullptr;
 
-  // Set by js_on_uncaught_exception; called from JSI's
-  // ::setThrowFromHostFunction hook (Hermes routes thrown
-  // exceptions through that — TODO confirm exact API on first use).
+  // Pending-exception slot. js.h's NAPI-style convention: when a
+  // host function fails, it stores the error here and returns null
+  // (or its error sentinel). Callers query via
+  // js_is_exception_pending / js_get_and_clear_last_exception.
+  //
+  // We use a unique_ptr-of-jsi::Value (move-only) rather than
+  // jsi::Value-by-value because the latter requires construction
+  // up front and we want to signal "no pending exception" with a
+  // null pointer.
+  std::unique_ptr<jsi::Value> pending_exception;
+
+  // Set by js_on_uncaught_exception; called by js_run_script when
+  // a JSError escapes the script body and no closer try/catch
+  // caught it. Maps to Bare's "uncaughtException" event flow.
   js_uncaught_exception_cb on_uncaught = nullptr;
   void *on_uncaught_data = nullptr;
 };
@@ -313,9 +324,18 @@ js_create_function(js_env_t *env, const char *name, size_t len, js_function_cb c
       const jsi::Value *args,
       size_t count
     ) -> jsi::Value {
-      (void) rt;
       js_callback_info_s info{env, &thisVal, args, count, data};
       js_value_t *ret = cb(env, &info);
+
+      // If the C callback set a pending exception (via js_throw_*),
+      // surface it as a jsi::JSError so JS-side try/catch sees it.
+      // The JSError's value is the error object we stored on the env.
+      if (env->pending_exception) {
+        auto err = std::move(*env->pending_exception);
+        env->pending_exception.reset();
+        throw jsi::JSError(rt, std::move(err));
+      }
+
       if (ret == nullptr) {
         // C callback returned nothing — coerce to undefined.
         return jsi::Value::undefined();
@@ -427,9 +447,41 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
   auto &rt = *env->runtime;
   auto src = source->value.asString(rt).utf8(rt);
   auto buffer = std::make_shared<jsi::StringBuffer>(src);
-  auto out = rt.evaluateJavaScript(buffer, file ? file : "<script>");
-  *result = adopt_value(env, std::move(out));
-  return 0;
+  try {
+    auto out = rt.evaluateJavaScript(buffer, file ? file : "<script>");
+    if (result) *result = adopt_value(env, std::move(out));
+    return 0;
+  } catch (jsi::JSError &err) {
+    // Adopt the thrown value into the current scope so the
+    // on_uncaught callback can keep using it. We swallow JSError's
+    // own message — the value() it carries is the JS-side Error
+    // object Bare wants to surface.
+    js_value_t *errv = adopt_value(env, jsi::Value(rt, err.value()));
+    if (env->on_uncaught) {
+      env->on_uncaught(env, errv, env->on_uncaught_data);
+    } else {
+      fprintf(stderr, "[libhermes] uncaught JS error in run_script: %s\n",
+        err.what());
+    }
+    if (result) *result = nullptr;
+    return -1;
+  } catch (jsi::JSIException &err) {
+    // JSI host-side failure (allocation, invalid Value access, etc.) —
+    // not a JS-thrown error. No `.value()`, so build a synthetic
+    // Error object holding the C++ exception's message.
+    auto msg = jsi::String::createFromUtf8(rt, err.what());
+    auto errObj = rt.global().getPropertyAsFunction(rt, "Error")
+      .callAsConstructor(rt, msg);
+    js_value_t *errv = adopt_value(env, std::move(errObj));
+    if (env->on_uncaught) {
+      env->on_uncaught(env, errv, env->on_uncaught_data);
+    } else {
+      fprintf(stderr, "[libhermes] JSI exception in run_script: %s\n",
+        err.what());
+    }
+    if (result) *result = nullptr;
+    return -1;
+  }
 }
 
 // === Primitives =====================================================
@@ -661,5 +713,100 @@ js_get_array_length(js_env_t *env, js_value_t *array, uint32_t *result) {
   auto &rt = *env->runtime;
   auto arr = array->value.asObject(rt).asArray(rt);
   *result = static_cast<uint32_t>(arr.size(rt));
+  return 0;
+}
+
+// === Exception path =================================================
+//
+// js.h's NAPI-style convention: host functions set a "pending
+// exception" on the env when something goes wrong, and return a
+// sentinel (usually null) to their caller. The dispatch lambda in
+// js_create_function checks pending_exception after each callback
+// and re-throws as jsi::JSError so the JS-side try/catch sees it.
+// Callers querying the env can pull the value back out via
+// js_get_and_clear_last_exception.
+
+// Build a JS Error object with a given constructor name. Helper for
+// js_throw_error / js_throw_type_error / etc.
+static jsi::Value
+build_error(jsi::Runtime &rt, const char *ctor_name, const char *code, const char *message) {
+  auto msg_str = jsi::String::createFromUtf8(rt, message ? message : "");
+  auto ctor = rt.global().getPropertyAsFunction(rt, ctor_name);
+  auto err = ctor.callAsConstructor(rt, msg_str);
+  // Attach `.code` if supplied — Node-compatible Error code idiom.
+  if (code != nullptr) {
+    auto err_obj = err.asObject(rt);
+    err_obj.setProperty(rt, "code", jsi::String::createFromUtf8(rt, code));
+  }
+  return err;
+}
+
+extern "C" int
+js_throw(js_env_t *env, js_value_t *error) {
+  auto &rt = *env->runtime;
+  env->pending_exception = std::make_unique<jsi::Value>(rt, error->value);
+  return 0;
+}
+
+extern "C" int
+js_throw_error(js_env_t *env, const char *code, const char *message) {
+  auto &rt = *env->runtime;
+  env->pending_exception = std::make_unique<jsi::Value>(
+    build_error(rt, "Error", code, message)
+  );
+  return 0;
+}
+
+extern "C" int
+js_throw_type_error(js_env_t *env, const char *code, const char *message) {
+  auto &rt = *env->runtime;
+  env->pending_exception = std::make_unique<jsi::Value>(
+    build_error(rt, "TypeError", code, message)
+  );
+  return 0;
+}
+
+extern "C" int
+js_throw_range_error(js_env_t *env, const char *code, const char *message) {
+  auto &rt = *env->runtime;
+  env->pending_exception = std::make_unique<jsi::Value>(
+    build_error(rt, "RangeError", code, message)
+  );
+  return 0;
+}
+
+extern "C" int
+js_throw_syntax_error(js_env_t *env, const char *code, const char *message) {
+  auto &rt = *env->runtime;
+  env->pending_exception = std::make_unique<jsi::Value>(
+    build_error(rt, "SyntaxError", code, message)
+  );
+  return 0;
+}
+
+extern "C" int
+js_throw_reference_error(js_env_t *env, const char *code, const char *message) {
+  auto &rt = *env->runtime;
+  env->pending_exception = std::make_unique<jsi::Value>(
+    build_error(rt, "ReferenceError", code, message)
+  );
+  return 0;
+}
+
+extern "C" int
+js_is_exception_pending(js_env_t *env, bool *result) {
+  *result = (env->pending_exception != nullptr);
+  return 0;
+}
+
+extern "C" int
+js_get_and_clear_last_exception(js_env_t *env, js_value_t **result) {
+  if (!env->pending_exception) {
+    *result = adopt_value(env, jsi::Value::undefined());
+    return 0;
+  }
+  auto err = std::move(*env->pending_exception);
+  env->pending_exception.reset();
+  *result = adopt_value(env, std::move(err));
   return 0;
 }

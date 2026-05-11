@@ -16,6 +16,7 @@ list(APPEND tests
   host-function
   global-host-binding
   data-roundtrip
+  exception-flow
 )
 
 foreach(test IN LISTS tests)
