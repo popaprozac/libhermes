@@ -20,6 +20,7 @@ list(APPEND tests
   arraybuffer-roundtrip
   promise-flow
   define-properties
+  wrap-unwrap
 )
 
 foreach(test IN LISTS tests)

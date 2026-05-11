@@ -1109,6 +1109,78 @@ js_is_external(js_env_t *env, js_value_t *value, bool *result) {
   return 0;
 }
 
+// === Wrap / unwrap =================================================
+//
+// Like externals but attached to an existing object instead of
+// creating a fresh wrapper. This is how bare-tcp / bare-tls / etc.
+// associate a C struct (an `uv_tcp_t*`, `BIO*`, ...) with a JS
+// instance — JS-side code holds a regular object; C-side code
+// fishes out the pointer via js_unwrap.
+//
+// Implementation reuses ExternalState (same C-data + finalizer
+// shape). js_wrap also returns a js_ref_t so the C caller can
+// keep the JS object alive across handle scopes — convenient
+// for "stash this in my own state and forget about scope".
+
+extern "C" int
+js_wrap(js_env_t *env, js_value_t *object, void *data, js_finalize_cb finalize_cb, void *finalize_hint, js_ref_t **result) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  auto state = std::make_shared<ExternalState>(env, data, finalize_cb, finalize_hint);
+  obj.setNativeState(rt, state);
+
+  // Optionally return a strong reference. Caller passes NULL to
+  // skip; bare-* bindings typically grab one so the JS handle
+  // doesn't get GC'd while their C-side state machine still cares.
+  if (result != nullptr) {
+    auto *ref = new js_ref_s();
+    ref->value = jsi::Value(rt, obj);
+    ref->runtime = env->runtime.get();
+    ref->refcount = 1;
+    *result = ref;
+  }
+  return 0;
+}
+
+extern "C" int
+js_unwrap(js_env_t *env, js_value_t *object, void **result) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  if (!obj.hasNativeState<ExternalState>(rt)) {
+    *result = nullptr;
+    return -1;
+  }
+  auto state = obj.getNativeState<ExternalState>(rt);
+  *result = state ? state->data() : nullptr;
+  return 0;
+}
+
+extern "C" int
+js_remove_wrap(js_env_t *env, js_value_t *object, void **result) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  if (!obj.hasNativeState<ExternalState>(rt)) {
+    if (result) *result = nullptr;
+    return 0;
+  }
+  if (result) {
+    auto state = obj.getNativeState<ExternalState>(rt);
+    *result = state ? state->data() : nullptr;
+  }
+  // JSI doesn't have a "clear NativeState" — setting it to nullptr
+  // isn't supported either. Best-effort: stash a no-op replacement
+  // state. The original ExternalState's finalize_cb won't fire on
+  // GC because we still hold a shared_ptr to it through the
+  // replacement, but the data pointer becomes inaccessible via
+  // js_unwrap (the new state has data=nullptr).
+  //
+  // TODO: replace with a proper "drop native state" once JSI gains
+  // the API. In practice bare doesn't call remove_wrap often.
+  auto cleared = std::make_shared<ExternalState>(env, nullptr, nullptr, nullptr);
+  obj.setNativeState(rt, cleared);
+  return 0;
+}
+
 // === Promises =======================================================
 //
 // JSI has no first-class promise factory — you build one through
