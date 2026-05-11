@@ -456,10 +456,32 @@ js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size
   // into JS args directly.
   const jsi::Value *cjargs = jargs;
   jsi::Value out;
-  if (receiver != nullptr) {
-    out = fn.callWithThis(rt, receiver->value.asObject(rt), cjargs, argc);
-  } else {
-    out = fn.call(rt, cjargs, argc);
+  // jsi::Function::call propagates JS errors as C++ exceptions
+  // (jsi::JSError). Bare's callers don't catch C++ exceptions, so
+  // an uncaught JS error inside the called function would walk up
+  // the stack until libc++abi terminates the whole process. Catch
+  // here and surface as a normal -1 return + pending exception.
+  try {
+    if (receiver != nullptr) {
+      out = fn.callWithThis(rt, receiver->value.asObject(rt), cjargs, argc);
+    } else {
+      out = fn.call(rt, cjargs, argc);
+    }
+  } catch (jsi::JSError &err) {
+    js_value_t *errv = adopt_value(env, jsi::Value(rt, err.value()));
+    if (env->on_uncaught) {
+      env->on_uncaught(env, errv, env->on_uncaught_data);
+    } else {
+      fprintf(stderr, "[libhermes] uncaught JSError in js_call_function: %s\n",
+        err.what());
+    }
+    if (result) *result = nullptr;
+    return -1;
+  } catch (jsi::JSIException &err) {
+    fprintf(stderr, "[libhermes] JSI exception in js_call_function: %s\n",
+      err.what());
+    if (result) *result = nullptr;
+    return -1;
   }
 
   if (result != nullptr) {
