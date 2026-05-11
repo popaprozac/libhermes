@@ -12,9 +12,7 @@
 # cmake-bare test harness will pick it up.
 
 list(APPEND tests
-  # call-function
-  # create-env
-  # eval-script
+  eval-script
 )
 
 foreach(test IN LISTS tests)

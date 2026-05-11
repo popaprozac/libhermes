@@ -42,6 +42,7 @@ extern "C" {
 #include <hermes/hermes.h>
 #include <jsi/jsi.h>
 
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -113,6 +114,26 @@ struct js_value_s {
     (void) fn;       \
     return -1;       \
   } while (0)
+
+// === Internal helpers ================================================
+
+// Adopt a jsi::Value into the current handle scope and return the
+// js_value_t* the C ABI hands out. Caller must have an open scope —
+// js.h's contract is that every value creation is bracketed by
+// js_open_handle_scope / js_close_handle_scope.
+//
+// We don't try to guard against a missing scope here; callers
+// violating that contract get a deterministic crash (top_scope null
+// deref) which is a louder bug than a leaked allocation.
+static js_value_t *
+adopt_value(js_env_t *env, jsi::Value &&value) {
+  auto wrapper = std::make_unique<js_value_s>();
+  wrapper->value = std::move(value);
+  wrapper->runtime = env->runtime.get();
+  auto *raw = wrapper.get();
+  env->top_scope->values.push_back(std::move(wrapper));
+  return raw;
+}
 
 // === Platform / Env =================================================
 
@@ -220,42 +241,70 @@ js_close_handle_scope(js_env_t *env, js_handle_scope_t *scope) {
 
 extern "C" int
 js_create_string_utf8(js_env_t *env, const utf8_t *str, size_t len, js_value_t **result) {
-  (void) env; (void) str; (void) len; (void) result;
-  NOT_IMPL("js_create_string_utf8");
+  auto s = jsi::String::createFromUtf8(
+    *env->runtime, reinterpret_cast<const uint8_t *>(str), len
+  );
+  *result = adopt_value(env, jsi::Value(*env->runtime, s));
+  return 0;
 }
 
 extern "C" int
 js_get_value_string_utf8(js_env_t *env, js_value_t *value, utf8_t *buf, size_t len, size_t *result) {
-  (void) env; (void) value; (void) buf; (void) len; (void) result;
-  NOT_IMPL("js_get_value_string_utf8");
+  auto &rt = *env->runtime;
+  auto s = value->value.asString(rt).utf8(rt);
+  if (buf == nullptr) {
+    // NAPI convention: nullptr buffer = query required length.
+    if (result) *result = s.size();
+    return 0;
+  }
+  size_t to_copy = (len > 0 && len < s.size()) ? len : s.size();
+  std::memcpy(buf, s.data(), to_copy);
+  if (result) *result = to_copy;
+  return 0;
 }
 
 extern "C" int
 js_get_global(js_env_t *env, js_value_t **result) {
-  (void) env; (void) result;
-  NOT_IMPL("js_get_global");
+  auto g = env->runtime->global();
+  *result = adopt_value(env, jsi::Value(*env->runtime, g));
+  return 0;
 }
 
 extern "C" int
 js_set_named_property(js_env_t *env, js_value_t *object, const char *name, js_value_t *value) {
-  (void) env; (void) object; (void) name; (void) value;
-  NOT_IMPL("js_set_named_property");
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  obj.setProperty(rt, name, jsi::Value(rt, value->value));
+  return 0;
 }
 
 extern "C" int
 js_create_function(js_env_t *env, const char *name, size_t len, js_function_cb cb, void *data, js_value_t **result) {
   (void) env; (void) name; (void) len; (void) cb; (void) data; (void) result;
+  // TODO: jsi::Function::createFromHostFunction with a lambda that
+  // wraps the C callback. Needs js_callback_info_t materialization
+  // and ArgsConverter machinery — punt to its own commit.
   NOT_IMPL("js_create_function");
 }
 
 extern "C" int
 js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size_t argc, js_value_t *const argv[], js_value_t **result) {
   (void) env; (void) receiver; (void) function; (void) argc; (void) argv; (void) result;
+  // TODO: jsi::Function::callWithThis. Needs argv → jsi::Value[]
+  // marshalling. Pairs with js_create_function on next commit.
   NOT_IMPL("js_call_function");
 }
 
 extern "C" int
 js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_t *source, js_value_t **result) {
-  (void) env; (void) file; (void) len; (void) offset; (void) source; (void) result;
-  NOT_IMPL("js_run_script");
+  // `len` / `offset` are debug-info hints (script position in
+  // a parent file). Hermes JSI takes only the sourceURL string;
+  // we ignore the positional info for now.
+  (void) len; (void) offset;
+  auto &rt = *env->runtime;
+  auto src = source->value.asString(rt).utf8(rt);
+  auto buffer = std::make_shared<jsi::StringBuffer>(src);
+  auto out = rt.evaluateJavaScript(buffer, file ? file : "<script>");
+  *result = adopt_value(env, std::move(out));
+  return 0;
 }
