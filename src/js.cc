@@ -516,14 +516,17 @@ js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size
     }
     return 0;
   } catch (jsi::JSError &err) {
+    // Always log the JSError on its way through — even when
+    // on_uncaught is set, the upstream handler may swallow it and
+    // we want a breadcrumb in stderr to diagnose bootstrap-time
+    // issues like the bare.js exception path.
+    fprintf(stderr, "[libhermes] JSError in js_call_function: %s\n",
+      err.what());
     js_value_t *errv = adopt_value(env, jsi::Value(rt, err.value()));
     if (env->on_uncaught && !env->in_uncaught) {
       env->in_uncaught = true;
       env->on_uncaught(env, errv, env->on_uncaught_data);
       env->in_uncaught = false;
-    } else {
-      fprintf(stderr, "[libhermes] uncaught JSError in js_call_function: %s\n",
-        err.what());
     }
     if (result) *result = nullptr;
     return -1;
