@@ -1306,6 +1306,87 @@ js_create_unsafe_arraybuffer(js_env_t *env, size_t len, void **data, js_value_t 
   return js_create_arraybuffer(env, len, data, result);
 }
 
+// js_get_typedarray_info — introspect a TypedArray (returns its
+// element type, byte-length, backing arraybuffer, byte-offset, and
+// a pointer into the backing store at the offset). JSI's public
+// API doesn't expose this directly; we reach for the JS-side
+// properties (`.buffer`, `.byteOffset`, `.byteLength`,
+// `.constructor.name`) and resolve the type from the constructor
+// name. Slow path but correct — bare-buffer calls this once per
+// typed array passed in from JS, not in hot loops.
+extern "C" int
+js_get_typedarray_info(
+    js_env_t *env,
+    js_value_t *typedarray,
+    js_typedarray_type_t *type,
+    void **data,
+    size_t *len,
+    js_value_t **arraybuffer,
+    size_t *offset) {
+  if (typedarray == nullptr) return -1;
+  auto &rt = *env->runtime;
+  try {
+    auto obj = typedarray->value.asObject(rt);
+    // .byteOffset / .byteLength / .buffer
+    double byteOffset = obj.getProperty(rt, "byteOffset").asNumber();
+    double byteLength = obj.getProperty(rt, "byteLength").asNumber();
+    auto bufVal = obj.getProperty(rt, "buffer");
+
+    // Discriminate the element type via constructor.name. JSI
+    // ArrayBuffer has a `data()` accessor we use to derive the
+    // backing pointer + offset.
+    auto ctorName = obj.getProperty(rt, "constructor")
+      .asObject(rt)
+      .getProperty(rt, "name")
+      .asString(rt).utf8(rt);
+
+    auto resolveType = [](const std::string &n) -> js_typedarray_type_t {
+      if (n == "Int8Array")         return js_int8array;
+      if (n == "Uint8Array")        return js_uint8array;
+      if (n == "Uint8ClampedArray") return js_uint8clampedarray;
+      if (n == "Int16Array")        return js_int16array;
+      if (n == "Uint16Array")       return js_uint16array;
+      if (n == "Int32Array")        return js_int32array;
+      if (n == "Uint32Array")       return js_uint32array;
+      if (n == "Float32Array")      return js_float32array;
+      if (n == "Float64Array")      return js_float64array;
+      if (n == "BigInt64Array")     return js_bigint64array;
+      if (n == "BigUint64Array")    return js_biguint64array;
+      return js_uint8array; // fall-back; safest for byte access
+    };
+
+    js_typedarray_type_t resolved = resolveType(ctorName);
+
+    // element size by type → length in elements
+    size_t elementSize = 1;
+    switch (resolved) {
+      case js_int16array: case js_uint16array: case js_float16array: elementSize = 2; break;
+      case js_int32array: case js_uint32array: case js_float32array: elementSize = 4; break;
+      case js_float64array: case js_bigint64array: case js_biguint64array: elementSize = 8; break;
+      default: elementSize = 1;
+    }
+
+    if (type) *type = resolved;
+    if (len) *len = static_cast<size_t>(byteLength) / elementSize;
+    if (offset) *offset = static_cast<size_t>(byteOffset);
+
+    if (arraybuffer || data) {
+      auto ab = bufVal.asObject(rt).getArrayBuffer(rt);
+      if (data) *data = ab.data(rt) + static_cast<size_t>(byteOffset);
+      if (arraybuffer) {
+        *arraybuffer = adopt_value(env, std::move(bufVal));
+      }
+    }
+    return 0;
+  } catch (jsi::JSError &err) {
+    fprintf(stderr, "[libhermes] js_get_typedarray_info JSError: %s\n", err.what());
+    return -1;
+  } catch (jsi::JSIException &err) {
+    fprintf(stderr, "[libhermes] js_get_typedarray_info JSI exception: %s\n", err.what());
+    return -1;
+  }
+}
+
 extern "C" int
 js_create_external_arraybuffer(js_env_t *env, void *data, size_t len, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
   auto &rt = *env->runtime;
@@ -1875,7 +1956,11 @@ STUB(js_create_sharedarraybuffer_with_backing_store, js_env_t*, js_arraybuffer_b
 STUB(js_get_sharedarraybuffer_info, js_env_t*, js_value_t*, void**, size_t*)
 STUB(js_get_sharedarraybuffer_backing_store, js_env_t*, js_value_t*, js_arraybuffer_backing_store_t**)
 STUB(js_create_typedarray, js_env_t*, js_typedarray_type_t, size_t, js_value_t*, size_t, js_value_t**)
-STUB(js_get_typedarray_info, js_env_t*, js_value_t*, js_typedarray_type_t*, void**, size_t*, js_value_t**, size_t*)
+// js_get_typedarray_info has a real impl below — bare-buffer
+// uses it to introspect typed arrays handed in from JS (e.g.
+// Buffer.from(uint8Array) needs to know the underlying buffer +
+// offset). Stubbed -1 means bare-buffer can't unwrap typed
+// arrays passed from user code, which is a non-starter.
 STUB(js_create_dataview, js_env_t*, size_t, js_value_t*, size_t, js_value_t**)
 STUB(js_get_dataview_info, js_env_t*, js_value_t*, void**, size_t*, js_value_t**, size_t*)
 STUB(js_get_array_elements, js_env_t*, js_value_t*, js_value_t*[], size_t, size_t, uint32_t*)
