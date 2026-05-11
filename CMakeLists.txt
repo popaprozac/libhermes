@@ -6,22 +6,49 @@ find_package(cmake-fetch REQUIRED PATHS node_modules/cmake-fetch)
 # CXX enabled at the project level.
 project(js C CXX)
 
-# Hermes ships its source via facebook/hermes. Pin to a specific
-# release tag so builds are reproducible — bump deliberately. The
-# Hermes commit chosen here should be vetted against:
-#   - LLVM/CMake compat (Hermes carries vendored LLVM utilities)
-#   - iOS cross-build (CMAKE_MACOSX_BUNDLE=OFF must be honored by
-#     the build, same trick as our BoringSSL integration in zapp)
-#   - ES feature coverage Zapp depends on (regex, Intl subset)
+# Two embedding modes:
 #
-# TODO: pin actual commit / tag here before first real build.
-fetch_package("github:facebook/hermes@hermes-v0.13.0")
+#   1. Embedded in Bare's build (the production path) — Bare's
+#      top-level CMakeLists has already declared `uv`, `utf`, and
+#      we just need to fetch Hermes ourselves.
+#
+#   2. Standalone (`cmake -B build` from this repo, for local
+#      development of the binding) — nothing's declared, fetch
+#      everything.
+#
+# `if(NOT TARGET …)` guards make each fetch opt-in.
 
-# Pull libjs (the js.h header) from Holepunch — same source-of-truth
-# for the engine ABI that libjsc / libqjs / libv8 all bind against.
-# We DON'T link libjs.a; just need its include/ directory.
-fetch_package("github:holepunchto/libjs" SOURCE_DIR js)
+# Hermes ships its source via facebook/hermes. Tags follow a
+# date + RN version scheme (https://github.com/facebook/hermes/tags).
+# Pin deliberately; bump on demand. We need Hermes' VM static lib
+# (`hermesvm` historically; verify on first configure) and JSI
+# headers from the same repo.
+if(NOT TARGET hermesvm)
+  fetch_package("github:facebook/hermes@hermes-2025-09-01-RNv0.82.0-265ef62ff3eb7289d17e366664ac0da82303e101")
+endif()
+
+# libintrusive — Holepunch's intrusive data structures, used by every
+# Bare engine binding for handle / scope lists. Always fetched.
 fetch_package("github:holepunchto/libintrusive")
+
+# libuv and libutf — fetched only in standalone mode. When Bare
+# embeds us, it has already declared these targets and re-fetching
+# would produce duplicate-target errors.
+if(NOT TARGET uv)
+  fetch_package("github:libuv/libuv@1.52.1")
+endif()
+if(NOT TARGET utf)
+  fetch_package("github:holepunchto/libutf")
+endif()
+
+# We vendor `include/js.h` directly (from holepunchto/libjs) rather
+# than fetch_package'ing libjs. cmake-fetch always add_subdirectory's
+# the fetched repo, which would run libjs's CMakeLists — libjs is the
+# V8 binding and requires GN to configure V8 itself. We only need the
+# header, so vendoring sidesteps the gn dependency entirely.
+#
+# Bump `include/js.h` by re-curl'ing from holepunchto/libjs when the
+# ABI rev's.
 
 add_library(js OBJECT)
 
@@ -47,7 +74,7 @@ target_include_directories(
   INTERFACE
     include
   PUBLIC
-    ${js}/include
+    include
   PRIVATE
     # Hermes target names are set by hermes' CMakeLists; the
     # canonical ones are `hermesvm` (the static lib) and `hermesvm`
