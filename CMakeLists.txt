@@ -32,11 +32,15 @@ project(js C CXX)
 # of .a, and the final zapp link can't find the static symbols.
 #
 # We pin BUILD_SHARED_LIBS=OFF (with FORCE so it wins over Hermes'
-# `CACHE BOOL` default) BEFORE fetching Hermes. We also opt into
-# HERMES_STATIC_LINK which pins HERMES_BUILD_SHARED_JSI=OFF as a
-# belt-and-suspenders measure (otherwise libjsi builds as .dylib).
+# `CACHE BOOL` default) BEFORE fetching Hermes, and also pin
+# HERMES_BUILD_SHARED_JSI=OFF so libjsi builds as .a instead of
+# .dylib.
+#
+# Do NOT use Hermes' `HERMES_STATIC_LINK=ON` switch — it appends
+# `-static` to CMAKE_EXE_LINKER_FLAGS, which fails on macOS (no
+# fully-static libc), and clamps CMAKE_FIND_LIBRARY_SUFFIXES to
+# only `.a`, which breaks downstream macOS framework lookups.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Prefer producing static libs" FORCE)
-set(HERMES_STATIC_LINK ON CACHE BOOL "Build Hermes statically" FORCE)
 set(HERMES_BUILD_SHARED_JSI OFF CACHE BOOL "Build JSI statically" FORCE)
 if(NOT TARGET hermesvm)
   fetch_package("github:facebook/hermes@hermes-2025-09-01-RNv0.82.0-265ef62ff3eb7289d17e366664ac0da82303e101")
