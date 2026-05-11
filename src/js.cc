@@ -98,6 +98,14 @@ struct js_env_s {
   // would call on_uncaught again — infinite recursion. When this
   // is true we skip the callback and just print the error.
   bool in_uncaught = false;
+
+  // Set by js_on_unhandled_rejection. Bare registers this during
+  // worker bootstrap. We store the slot today but don't yet wire
+  // it to Hermes' promise-rejection-tracker — bare doesn't
+  // currently rely on the callback firing, it just needs the
+  // register call to succeed so its bootstrap proceeds.
+  js_unhandled_rejection_cb on_unhandled_rejection = nullptr;
+  void *on_unhandled_rejection_data = nullptr;
 };
 
 // A scope owns a vector of values; closing the scope drops them all.
@@ -253,6 +261,27 @@ extern "C" int
 js_on_uncaught_exception(js_env_t *env, js_uncaught_exception_cb cb, void *data) {
   env->on_uncaught = cb;
   env->on_uncaught_data = data;
+  return 0;
+}
+
+// Bare's worker bootstrap (vendor/bare/src/runtime.c) calls this
+// shortly after env creation. Returning -1 (as the STUB did)
+// caused bare's subsequent setup to read an undefined function
+// out of its registered handler slot, which then surfaced as the
+// "Value is undefined, expected an Object" JSError when bare
+// tried to call it.
+//
+// We store the cb/data slot so the register call succeeds. Wiring
+// it to Hermes' actual unhandled-rejection notifications is a
+// follow-up: Hermes exposes `setRejectionTracker` on the C++ side
+// (host runtime API); we'd hook it to dispatch into env->on_unhandled_rejection.
+// For now, bare's bootstrap only needs the register call to
+// return 0 — the callback never actually fires today, and bare
+// has its own fallback path for unhandled rejections.
+extern "C" int
+js_on_unhandled_rejection(js_env_t *env, js_unhandled_rejection_cb cb, void *data) {
+  env->on_unhandled_rejection = cb;
+  env->on_unhandled_rejection_data = data;
   return 0;
 }
 
@@ -1798,7 +1827,9 @@ STUB(js_create_typed_function, js_env_t*, const char*, size_t, js_function_cb, c
 STUB(js_get_typed_callback_info, const js_typed_callback_info_t*, js_env_t**, void**)
 STUB(js_terminate_execution, js_env_t*)
 STUB(js_fatal_exception,     js_env_t*, js_value_t*)
-STUB(js_on_unhandled_rejection, js_env_t*, js_unhandled_rejection_cb, void*)
+// Real impl below (not stubbed) — keep the macro list consistent
+// by leaving this comment in place so the surrounding STUB(...) lines
+// don't visually suggest it's also stubbed.
 
 // is_X predicates we haven't implemented yet (delegate / Date / Map /
 // Set / Proxy / etc.) — they all just return false for now.
