@@ -28,24 +28,43 @@ Concrete wins:
 
 ## Status
 
-**Phase 1: in progress.** Build pipeline works end-to-end and the
-first smoke test passes:
+**Phase 1: complete + most of Phase 2 surface.** Seven end-to-end
+tests pass against Hermes:
 
 ```
 $ bun install
-$ cmake -B build
-$ cmake --build build --target eval-script
-$ ./build/test/eval-script
-[eval-script] result: 'hello, hermes' (len=13)
-[eval-script] OK
+$ cmake -B build && cmake --build build -j4
+$ for t in eval-script host-function global-host-binding \
+           data-roundtrip exception-flow arraybuffer-roundtrip \
+           promise-flow; do
+    ./build/test/$t || break
+  done
 ```
 
-That exercises platform / env creation, handle scopes, string
-creation + UTF-8 readback, and `js_run_script` through Hermes'
-JSI. Roughly 13 of 19 Phase 1 js_* functions are implemented; the
-remaining gap is `js_create_function` / `js_call_function` (the
-JSI HostFunction binding), which is the next thing to land before
-hooking into Bare proper.
+Functional coverage:
+
+| Area | Status |
+|---|---|
+| platform / env lifecycle | ✅ |
+| handle scopes | ✅ |
+| primitives (undef/null/bool/i32/u32/i64/f64) | ✅ |
+| type predicates (typeof + 12 is_X) | ✅ |
+| strings (UTF-8 create + readback) | ✅ |
+| objects + arrays (create / get / set / length / delete) | ✅ |
+| functions (host fn + call + callback_info) | ✅ |
+| run_script + eval result capture | ✅ |
+| exception flow (host→JS, JS→host) | ✅ |
+| persistent references (scope-crossing) | ✅ |
+| externals (NativeState-backed void*) | ✅ |
+| ArrayBuffer (owned + external, info/is) | ✅ |
+| promises (create + resolve/reject + microtask drain) | ✅ |
+| BigInt | ✗ |
+| Symbol, Date, RegExp details | ✗ |
+| Module loading (Module/SyntheticModule) | ✗ |
+| TypedArray / DataView | ✗ |
+| Wrap / unwrap (class-style C↔JS binding) | ✗ |
+| Property descriptors (define_properties) | ✗ |
+| Threadsafe functions (libuv ↔ JS) | ✗ |
 
 Planned phases:
 
