@@ -442,32 +442,16 @@ js_create_function(js_env_t *env, const char *name, size_t len, js_function_cb c
 
   // paramCount is advisory — JS callers can pass any number of args
   // regardless. Pass 0 so JSI doesn't impose an arity check.
-  // Capture the function name for stderr tracing (debug aid; see
-  // the fprintf inside the lambda).
-  std::string capturedName = fn_name;
   auto fn = jsi::Function::createFromHostFunction(
     rt, prop_name, 0,
     // Lambda captures the user's C callback + data. Each invocation
     // builds a js_callback_info_s on the stack and dispatches.
-    [env, cb, data, capturedName](
+    [env, cb, data](
       jsi::Runtime &rt,
       const jsi::Value &thisVal,
       const jsi::Value *args,
       size_t count
     ) -> jsi::Value {
-      // TEMPORARY trace: log every host-fn invocation so we can see
-      // which native bindings JS is calling. Remove once timer flow
-      // is understood.
-      {
-        static int _hostfn_count = 0;
-        ++_hostfn_count;
-        // Log everything past bootstrap (first ~100 calls) — that's
-        // where we want to see WHICH bindings fire on a wall-clock
-        // periodic basis.
-        if (_hostfn_count > 100 && _hostfn_count <= 200) {
-          fprintf(stderr, "[libhermes-trace] hostfn #%d: %s\n", _hostfn_count, capturedName.c_str());
-        }
-      }
       js_callback_info_s info{env, &thisVal, args, count, data};
       js_value_t *ret = cb(env, &info);
 
@@ -559,18 +543,6 @@ js_get_callback_info(js_env_t *env, const js_callback_info_t *info, size_t *argc
 extern "C" int
 js_call_function(js_env_t *env, js_value_t *receiver, js_value_t *function, size_t argc, js_value_t *const argv[], js_value_t **result) {
   auto &rt = *env->runtime;
-
-  // TEMPORARY trace: log every 100th call so we can see whether
-  // libuv-driven callbacks (timers, async, etc.) are firing. During
-  // bootstrap js_call_function is hit ~hundreds of times; after
-  // bootstrap, ticks should add 1 every interval. Remove once
-  // timers are confirmed working.
-  {
-    static int _count = 0;
-    if (++_count % 100 == 0) {
-      fprintf(stderr, "[libhermes-trace] js_call_function called %d times\n", _count);
-    }
-  }
 
   // Defensive: bare's bootstrap will happily call `js_call_function`
   // with a NULL callee if an earlier stub returned -1 without bare
