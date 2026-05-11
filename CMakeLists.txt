@@ -23,6 +23,21 @@ project(js C CXX)
 # Pin deliberately; bump on demand. We need Hermes' VM static lib
 # (`hermesvm` historically; verify on first configure) and JSI
 # headers from the same repo.
+#
+# CRITICAL: Hermes' CMakeLists.txt defaults BUILD_SHARED_LIBS to ON
+# on non-Windows platforms and writes it to CMake's CACHE. When
+# libhermes is fetched into Bare's build tree, that cache pollution
+# poisons every subsequent fetch — most importantly BoringSSL (used
+# by bare-tls / bare-crypto), which then builds as .dylib instead
+# of .a, and the final zapp link can't find the static symbols.
+#
+# We pin BUILD_SHARED_LIBS=OFF (with FORCE so it wins over Hermes'
+# `CACHE BOOL` default) BEFORE fetching Hermes. We also opt into
+# HERMES_STATIC_LINK which pins HERMES_BUILD_SHARED_JSI=OFF as a
+# belt-and-suspenders measure (otherwise libjsi builds as .dylib).
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Prefer producing static libs" FORCE)
+set(HERMES_STATIC_LINK ON CACHE BOOL "Build Hermes statically" FORCE)
+set(HERMES_BUILD_SHARED_JSI OFF CACHE BOOL "Build JSI statically" FORCE)
 if(NOT TARGET hermesvm)
   fetch_package("github:facebook/hermes@hermes-2025-09-01-RNv0.82.0-265ef62ff3eb7289d17e366664ac0da82303e101")
 endif()
