@@ -285,6 +285,56 @@ js_on_unhandled_rejection(js_env_t *env, js_unhandled_rejection_cb cb, void *dat
   return 0;
 }
 
+// Dynamic-import host hooks. Bare registers these during bootstrap;
+// our bundles don't actually use dynamic import yet (bare-pack
+// inlines everything), so we just accept the register and return
+// success. Wiring them to Hermes' host-promise-resolution path is
+// future work.
+extern "C" int
+js_on_dynamic_import(js_env_t *env, js_dynamic_import_cb cb, void *data) {
+  (void) env; (void) cb; (void) data;
+  return 0;
+}
+
+extern "C" int
+js_on_dynamic_import_transitional(js_env_t *env, js_dynamic_import_transitional_cb cb, void *data) {
+  (void) env; (void) cb; (void) data;
+  return 0;
+}
+
+// Teardown hooks. Bare registers cleanup callbacks for libuv
+// resources etc. We accept the register and return 0 so bootstrap
+// proceeds; firing the callbacks on env destroy is part of the
+// not-yet-implemented Hermes teardown story (the host app is
+// expected to live the lifetime of the process today).
+extern "C" int
+js_add_teardown_callback(js_env_t *env, js_teardown_cb callback, void *data) {
+  (void) env; (void) callback; (void) data;
+  return 0;
+}
+
+extern "C" int
+js_remove_teardown_callback(js_env_t *env, js_teardown_cb callback, void *data) {
+  (void) env; (void) callback; (void) data;
+  return 0;
+}
+
+extern "C" int
+js_add_deferred_teardown_callback(js_env_t *env, js_deferred_teardown_cb callback, void *data, js_deferred_teardown_t **result) {
+  (void) env; (void) callback; (void) data;
+  // bare expects a non-null handle back so it has something to
+  // pass to js_finish_deferred_teardown_callback later. Hand back
+  // a sentinel — we never inspect it.
+  if (result) *result = reinterpret_cast<js_deferred_teardown_t *>(0x1);
+  return 0;
+}
+
+extern "C" int
+js_finish_deferred_teardown_callback(js_deferred_teardown_t *handle) {
+  (void) handle;
+  return 0;
+}
+
 // === Handle scopes ==================================================
 
 extern "C" int
@@ -1760,8 +1810,10 @@ STUB(js_set_module_export,       js_env_t*, js_module_t*, js_value_t*, js_value_
 STUB(js_instantiate_module,      js_env_t*, js_module_t*, js_module_resolve_cb, void*)
 STUB(js_run_module,              js_env_t*, js_module_t*, js_value_t**)
 STUB(js_is_module_namespace,     js_env_t*, js_value_t*, bool*)
-STUB(js_on_dynamic_import,       js_env_t*, js_dynamic_import_cb, void*)
-STUB(js_on_dynamic_import_transitional, js_env_t*, js_dynamic_import_transitional_cb, void*)
+// Real impls below — bare registers these during bootstrap and
+// expects 0 return. We don't yet wire them to Hermes' dynamic
+// import path (no dynamic import support in bare-* bundles right
+// now), but the register call must succeed.
 
 // Threadsafe functions (libuv ↔ JS thread crossing — big chunk of work)
 STUB(js_create_threadsafe_function,    js_env_t*, js_value_t*, size_t, size_t, js_finalize_cb, void*, void*, js_threadsafe_function_cb, js_threadsafe_function_t**)
@@ -1773,10 +1825,10 @@ STUB(js_ref_threadsafe_function,       js_env_t*, js_threadsafe_function_t*)
 STUB(js_unref_threadsafe_function,     js_env_t*, js_threadsafe_function_t*)
 
 // Teardown callbacks
-STUB(js_add_teardown_callback,     js_env_t*, js_teardown_cb, void*)
-STUB(js_remove_teardown_callback,  js_env_t*, js_teardown_cb, void*)
-STUB(js_add_deferred_teardown_callback,    js_env_t*, js_deferred_teardown_cb, void*, js_deferred_teardown_t**)
-STUB(js_finish_deferred_teardown_callback, js_deferred_teardown_t*)
+// Real impls below — teardown hooks bare registers during
+// bootstrap. We accept the register but don't actually fire the
+// callbacks on env destroy yet (full Hermes-side teardown
+// orchestration is a separate workstream).
 
 // Inspector
 STUB(js_create_inspector,  js_env_t*, js_inspector_t**)
