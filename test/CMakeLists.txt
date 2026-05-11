@@ -15,6 +15,7 @@ list(APPEND tests
   eval-script
   host-function
   global-host-binding
+  data-roundtrip
 )
 
 foreach(test IN LISTS tests)

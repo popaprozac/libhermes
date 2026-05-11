@@ -431,3 +431,235 @@ js_run_script(js_env_t *env, const char *file, size_t len, int offset, js_value_
   *result = adopt_value(env, std::move(out));
   return 0;
 }
+
+// === Primitives =====================================================
+//
+// JSI represents undefined/null/bool/number as immediate values
+// (no GC pressure). All trivial mappings.
+
+extern "C" int
+js_get_undefined(js_env_t *env, js_value_t **result) {
+  *result = adopt_value(env, jsi::Value::undefined());
+  return 0;
+}
+
+extern "C" int
+js_get_null(js_env_t *env, js_value_t **result) {
+  *result = adopt_value(env, jsi::Value::null());
+  return 0;
+}
+
+extern "C" int
+js_get_boolean(js_env_t *env, bool value, js_value_t **result) {
+  *result = adopt_value(env, jsi::Value(value));
+  return 0;
+}
+
+extern "C" int
+js_create_int32(js_env_t *env, int32_t value, js_value_t **result) {
+  *result = adopt_value(env, jsi::Value(static_cast<double>(value)));
+  return 0;
+}
+
+extern "C" int
+js_create_uint32(js_env_t *env, uint32_t value, js_value_t **result) {
+  *result = adopt_value(env, jsi::Value(static_cast<double>(value)));
+  return 0;
+}
+
+extern "C" int
+js_create_int64(js_env_t *env, int64_t value, js_value_t **result) {
+  // JSI numbers are IEEE-754 doubles. Values outside ±2^53 lose
+  // precision — callers that need exact 64-bit integers should
+  // use BigInts via js_create_bigint_int64 (not yet implemented).
+  *result = adopt_value(env, jsi::Value(static_cast<double>(value)));
+  return 0;
+}
+
+extern "C" int
+js_create_double(js_env_t *env, double value, js_value_t **result) {
+  *result = adopt_value(env, jsi::Value(value));
+  return 0;
+}
+
+extern "C" int
+js_get_value_bool(js_env_t *env, js_value_t *value, bool *result) {
+  (void) env;
+  *result = value->value.getBool();
+  return 0;
+}
+
+extern "C" int
+js_get_value_int32(js_env_t *env, js_value_t *value, int32_t *result) {
+  (void) env;
+  // JS uses ToInt32 semantics for bitwise ops — NaN/Infinity → 0,
+  // wrap to int32 range otherwise. JSI just gives us the double;
+  // we truncate.
+  double d = value->value.getNumber();
+  *result = static_cast<int32_t>(d);
+  return 0;
+}
+
+extern "C" int
+js_get_value_double(js_env_t *env, js_value_t *value, double *result) {
+  (void) env;
+  *result = value->value.getNumber();
+  return 0;
+}
+
+// === Type predicates ================================================
+//
+// Same shape repeated 30+ times in js.h. JSI's Value carries a tag
+// queryable via isX() methods. js_is_array is the only one that
+// needs an extra runtime step (it's an Object whose .isArray() is
+// true) — handled inline.
+
+extern "C" int
+js_typeof(js_env_t *env, js_value_t *value, js_value_type_t *result) {
+  auto &rt = *env->runtime;
+  const auto &v = value->value;
+  if (v.isUndefined()) { *result = js_undefined; return 0; }
+  if (v.isNull())      { *result = js_null;      return 0; }
+  if (v.isBool())      { *result = js_boolean;   return 0; }
+  if (v.isNumber())    { *result = js_number;    return 0; }
+  if (v.isString())    { *result = js_string;    return 0; }
+  if (v.isSymbol())    { *result = js_symbol;    return 0; }
+  if (v.isBigInt())    { *result = js_bigint;    return 0; }
+  if (v.isObject()) {
+    auto obj = v.asObject(rt);
+    if (obj.isFunction(rt)) { *result = js_function; return 0; }
+    *result = js_object;
+    return 0;
+  }
+  // Should be unreachable.
+  *result = js_undefined;
+  return 0;
+}
+
+#define IS_PREDICATE(name, expr) \
+  extern "C" int                 \
+  name(js_env_t *env, js_value_t *value, bool *result) { \
+    (void) env; \
+    *result = (expr); \
+    return 0; \
+  }
+
+IS_PREDICATE(js_is_undefined, value->value.isUndefined())
+IS_PREDICATE(js_is_null,      value->value.isNull())
+IS_PREDICATE(js_is_boolean,   value->value.isBool())
+IS_PREDICATE(js_is_number,    value->value.isNumber())
+IS_PREDICATE(js_is_string,    value->value.isString())
+IS_PREDICATE(js_is_symbol,    value->value.isSymbol())
+IS_PREDICATE(js_is_bigint,    value->value.isBigInt())
+IS_PREDICATE(js_is_object,    value->value.isObject())
+
+#undef IS_PREDICATE
+
+extern "C" int
+js_is_function(js_env_t *env, js_value_t *value, bool *result) {
+  auto &rt = *env->runtime;
+  if (!value->value.isObject()) { *result = false; return 0; }
+  *result = value->value.asObject(rt).isFunction(rt);
+  return 0;
+}
+
+extern "C" int
+js_is_array(js_env_t *env, js_value_t *value, bool *result) {
+  auto &rt = *env->runtime;
+  if (!value->value.isObject()) { *result = false; return 0; }
+  *result = value->value.asObject(rt).isArray(rt);
+  return 0;
+}
+
+extern "C" int
+js_is_int32(js_env_t *env, js_value_t *value, bool *result) {
+  (void) env;
+  if (!value->value.isNumber()) { *result = false; return 0; }
+  double d = value->value.getNumber();
+  // Truthy when d is an exact integer in int32 range.
+  *result = (d == static_cast<double>(static_cast<int32_t>(d)));
+  return 0;
+}
+
+extern "C" int
+js_is_uint32(js_env_t *env, js_value_t *value, bool *result) {
+  (void) env;
+  if (!value->value.isNumber()) { *result = false; return 0; }
+  double d = value->value.getNumber();
+  *result = (d >= 0.0 && d == static_cast<double>(static_cast<uint32_t>(d)));
+  return 0;
+}
+
+// === Objects + arrays ===============================================
+
+extern "C" int
+js_create_object(js_env_t *env, js_value_t **result) {
+  auto obj = jsi::Object(*env->runtime);
+  *result = adopt_value(env, jsi::Value(*env->runtime, obj));
+  return 0;
+}
+
+extern "C" int
+js_create_array(js_env_t *env, js_value_t **result) {
+  auto arr = jsi::Array(*env->runtime, 0);
+  *result = adopt_value(env, jsi::Value(*env->runtime, arr));
+  return 0;
+}
+
+extern "C" int
+js_create_array_with_length(js_env_t *env, size_t len, js_value_t **result) {
+  auto arr = jsi::Array(*env->runtime, len);
+  *result = adopt_value(env, jsi::Value(*env->runtime, arr));
+  return 0;
+}
+
+extern "C" int
+js_get_named_property(js_env_t *env, js_value_t *object, const char *name, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  auto prop = obj.getProperty(rt, name);
+  *result = adopt_value(env, std::move(prop));
+  return 0;
+}
+
+extern "C" int
+js_delete_named_property(js_env_t *env, js_value_t *object, const char *name, bool *result) {
+  auto &rt = *env->runtime;
+  auto obj = object->value.asObject(rt);
+  // JSI doesn't expose `delete` directly — fall back to evaluating
+  // the delete operator via a synthesized function. Cleaner long
+  // term to wire to Hermes' VM API directly, but this is correct.
+  auto deleteFn = rt.global()
+    .getPropertyAsFunction(rt, "Function")
+    .callAsConstructor(rt, "obj", "name", "return delete obj[name];")
+    .asObject(rt)
+    .asFunction(rt);
+  auto out = deleteFn.call(rt, obj, jsi::String::createFromUtf8(rt, name));
+  if (result) *result = out.getBool();
+  return 0;
+}
+
+extern "C" int
+js_get_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t **result) {
+  auto &rt = *env->runtime;
+  auto arr = object->value.asObject(rt).asArray(rt);
+  auto v = arr.getValueAtIndex(rt, index);
+  *result = adopt_value(env, std::move(v));
+  return 0;
+}
+
+extern "C" int
+js_set_element(js_env_t *env, js_value_t *object, uint32_t index, js_value_t *value) {
+  auto &rt = *env->runtime;
+  auto arr = object->value.asObject(rt).asArray(rt);
+  arr.setValueAtIndex(rt, index, jsi::Value(rt, value->value));
+  return 0;
+}
+
+extern "C" int
+js_get_array_length(js_env_t *env, js_value_t *array, uint32_t *result) {
+  auto &rt = *env->runtime;
+  auto arr = array->value.asObject(rt).asArray(rt);
+  *result = static_cast<uint32_t>(arr.size(rt));
+  return 0;
+}
