@@ -1297,6 +1297,15 @@ js_create_arraybuffer(js_env_t *env, size_t len, void **data, js_value_t **resul
   return 0;
 }
 
+// Same as js_create_arraybuffer — bare's bare-buffer addon uses
+// this for perf (skip zero-fill) but the JS-visible behavior is
+// identical to the zeroed variant. Wire a non-zeroing fast path
+// later if profiling shows it.
+extern "C" int
+js_create_unsafe_arraybuffer(js_env_t *env, size_t len, void **data, js_value_t **result) {
+  return js_create_arraybuffer(env, len, data, result);
+}
+
 extern "C" int
 js_create_external_arraybuffer(js_env_t *env, void *data, size_t len, js_finalize_cb finalize_cb, void *finalize_hint, js_value_t **result) {
   auto &rt = *env->runtime;
@@ -1852,7 +1861,13 @@ STUB(js_get_value_bigint_words, js_env_t*, js_value_t*, int*, uint64_t*, size_t,
 
 // ArrayBuffer details + TypedArray + DataView
 STUB(js_create_arraybuffer_with_backing_store, js_env_t*, js_arraybuffer_backing_store_t*, void**, size_t*, js_value_t**)
-STUB(js_create_unsafe_arraybuffer, js_env_t*, size_t, void**, js_value_t**)
+// Real impl below — pass through to js_create_arraybuffer.
+// The "unsafe" variant is a Node.js convention: it skips
+// zeroing the backing store for perf (caller promises to write
+// every byte before reading). Our OwnedBuffer zero-fills, which
+// is correct (slower) — bare callers see the same behavior either
+// way. Wire a separate non-zeroing path later if a bench shows it
+// matters.
 STUB(js_get_arraybuffer_backing_store, js_env_t*, js_value_t*, js_arraybuffer_backing_store_t**)
 STUB(js_release_arraybuffer_backing_store, js_env_t*, js_arraybuffer_backing_store_t*)
 STUB(js_detach_arraybuffer, js_env_t*, js_value_t*)
