@@ -1396,6 +1396,76 @@ js_create_external_arraybuffer(js_env_t *env, void *data, size_t len, js_finaliz
   return 0;
 }
 
+// js_create_typedarray — view an existing ArrayBuffer as a TypedArray
+// of the given element type, length (in elements), and byte offset.
+//
+// JSI's public API doesn't expose TypedArray construction directly —
+// you can read TypedArrays back (via property access; see
+// js_get_typedarray_info) but not synthesize one. We reach for the
+// JS-side global constructor (`new Uint8Array(buffer, byteOffset,
+// length)`) and call it.
+//
+// bare-tls is the immediate caller in our wedge: TLS plaintext bytes
+// arrive in an external arraybuffer, then this wraps it as a Uint8Array
+// for the JS-side on_data callback. Without this, `fetch()` to any
+// `https://` URL hangs silently — the response body stream never
+// receives a single chunk.
+extern "C" int
+js_create_typedarray(
+    js_env_t *env,
+    js_typedarray_type_t type,
+    size_t length,
+    js_value_t *arraybuffer,
+    size_t byte_offset,
+    js_value_t **result) {
+  if (arraybuffer == nullptr) return -1;
+  auto &rt = *env->runtime;
+
+  // Map js_typedarray_type_t → global constructor name. JSI exposes
+  // these via the runtime's global object.
+  const char *ctorName = nullptr;
+  switch (type) {
+    case js_int8array:         ctorName = "Int8Array"; break;
+    case js_uint8array:        ctorName = "Uint8Array"; break;
+    case js_uint8clampedarray: ctorName = "Uint8ClampedArray"; break;
+    case js_int16array:        ctorName = "Int16Array"; break;
+    case js_uint16array:       ctorName = "Uint16Array"; break;
+    case js_int32array:        ctorName = "Int32Array"; break;
+    case js_uint32array:       ctorName = "Uint32Array"; break;
+    case js_float32array:      ctorName = "Float32Array"; break;
+    case js_float64array:      ctorName = "Float64Array"; break;
+    case js_bigint64array:     ctorName = "BigInt64Array"; break;
+    case js_biguint64array:    ctorName = "BigUint64Array"; break;
+    default:
+      fprintf(stderr, "[libhermes] js_create_typedarray: unsupported type %d\n", (int) type);
+      return -1;
+  }
+
+  try {
+    auto ctor = rt.global().getPropertyAsFunction(rt, ctorName);
+    // The TypedArray constructor signature is
+    //   new T(buffer, byteOffset, length)
+    // where `length` is the count of ELEMENTS, not bytes. The caller
+    // hands us length in elements per the libjs ABI. Use JSI's
+    // variadic callAsConstructor — the array+count overload doesn't
+    // template-match cleanly because Value is move-only.
+    auto typedArr = ctor.callAsConstructor(
+      rt,
+      jsi::Value(rt, arraybuffer->value),
+      jsi::Value(static_cast<double>(byte_offset)),
+      jsi::Value(static_cast<double>(length))
+    ).asObject(rt);
+    *result = adopt_value(env, jsi::Value(rt, std::move(typedArr)));
+    return 0;
+  } catch (jsi::JSError &err) {
+    fprintf(stderr, "[libhermes] js_create_typedarray JSError: %s\n", err.what());
+    return -1;
+  } catch (jsi::JSIException &err) {
+    fprintf(stderr, "[libhermes] js_create_typedarray JSI exception: %s\n", err.what());
+    return -1;
+  }
+}
+
 extern "C" int
 js_get_arraybuffer_info(js_env_t *env, js_value_t *arraybuffer, void **data, size_t *len) {
   auto &rt = *env->runtime;
@@ -1969,7 +2039,6 @@ STUB(js_detach_arraybuffer, js_env_t*, js_value_t*)
 STUB(js_create_sharedarraybuffer_with_backing_store, js_env_t*, js_arraybuffer_backing_store_t*, void**, size_t*, js_value_t**)
 STUB(js_get_sharedarraybuffer_info, js_env_t*, js_value_t*, void**, size_t*)
 STUB(js_get_sharedarraybuffer_backing_store, js_env_t*, js_value_t*, js_arraybuffer_backing_store_t**)
-STUB(js_create_typedarray, js_env_t*, js_typedarray_type_t, size_t, js_value_t*, size_t, js_value_t**)
 // js_get_typedarray_info has a real impl below — bare-buffer
 // uses it to introspect typed arrays handed in from JS (e.g.
 // Buffer.from(uint8Array) needs to know the underlying buffer +
